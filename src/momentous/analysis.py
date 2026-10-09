@@ -24,6 +24,7 @@ from momentous.domain import (
 from momentous.geometry import _settings, region_data
 from momentous.results import (
     Bound,
+    CheckProgress,
     CheckResult,
     ComplexArray,
     RealArray,
@@ -330,6 +331,9 @@ class AnalysisResult:
         -----
         Worst-case search and output are exponential. Repeated searches reuse
         established candidate certificates while returning separate size domains.
+        Callback progress counts every candidate in these size limits, including
+        cached or pruned candidates. Reaching the total means the traversal
+        finished; inspect ``complete`` separately for unresolved compatibility.
         Default worker selection checks the runtime GIL state. A native extension
         such as CVXPY's current ``_cvxcore`` can re-enable the GIL when imported;
         numerical array operations may still run concurrently.
@@ -355,7 +359,7 @@ def analyze(
     max_combination_size: int = 2,
     n_sigma: float = 3.0,
     tolerance: float = 1e-8,
-    on_check: Callable[[Waveset, CheckResult], None] | None = None,
+    on_check: Callable[[Waveset, CheckResult, CheckProgress], None] | None = None,
 ) -> AnalysisResult:
     r"""Normalize raw measurements and prepare necessary waveset compatibility checks.
 
@@ -375,12 +379,17 @@ def analyze(
     tolerance : float, default 1e-8
         Absolute numerical slack in normalized coordinates, separate from errors.
     on_check : callable, optional
-        Called as ``on_check(waves, result)`` after each numerical candidate
-        evaluation: the initial pool check, direct checks, search checks, and
-        minimal-set certification. Arguments are immutable ``Waveset`` and
-        ``CheckResult`` objects. Cached or inferred decisions do not emit events.
-        Callbacks run synchronously on the calling thread, including parallel
-        searches. Exceptions propagate after retaining the completed check.
+        Called as ``on_check(waves, result, progress)`` after each numerical
+        evaluation and when a search resolves a pruned or cached branch.
+        Arguments are immutable ``Waveset``, ``CheckResult``, and
+        ``CheckProgress`` objects. During searches, ``progress.completed`` and
+        ``progress.total`` count wavesets in the selected size domain, including
+        unresolved leaves. ``progress.evaluated`` distinguishes numerical checks
+        from branch-completion events. Outside searches, numerical checks report
+        ``phase='check'`` and ``completed=total=1``; cached and inferred direct
+        checks remain silent. Callbacks run synchronously on the calling thread,
+        including parallel searches. Exceptions propagate after retaining any
+        completed numerical check.
 
     Returns
     -------
@@ -457,7 +466,7 @@ def analyze(
     >>> checks = []
     >>> data = MomentData({(0, 0): 1, (1, 0): 0}, covariance=Covariance.exact())
     >>> analysis = analyze(data, Waveset([(0, 0), (1, 0)]),
-    ...     on_check=lambda waves, result: checks.append((waves, result.status)))
+    ...     on_check=lambda waves, result, progress: checks.append((waves, result.status)))
     >>> checks[0][0] == analysis.pool, checks[0][1].value
     (True, 'compatible')
 

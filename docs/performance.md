@@ -1,27 +1,42 @@
 # Search performance
 
-Pass `on_check(waves, result)` to `mo.analyze` to observe each completed numerical
-candidate evaluation. The callback remains attached to the prepared analysis and
-covers its initial pool check, direct checks, searches, and minimal certification.
-Cached and inferred decisions are silent. Callbacks run on the calling thread,
-including parallel searches, and exceptions propagate after retaining completed work.
+Pass `on_check(waves, result, progress)` to `mo.analyze` to observe numerical
+candidate evaluations and search progress. The callback remains attached to the
+prepared analysis and covers its initial pool check, direct checks, searches,
+and minimal certification. Callbacks run on the calling thread, including parallel
+searches, and exceptions propagate after retaining completed numerical work.
 
 Momentous does not choose a display library. The demo uses tqdm directly:
 
 ```python
 from tqdm.auto import tqdm
 
-with tqdm(desc="Waveset checks", unit="check") as progress:
-    analysis = mo.analyze(data, pool, on_check=lambda waves, result: progress.update())
+with tqdm(desc="Wavesets", unit="waveset") as bar:
+
+    def on_check(waves, result, progress):
+        if progress.phase == "search":
+            bar.total = progress.total
+            bar.update(progress.completed - bar.n)
+
+    analysis = mo.analyze(data, pool, on_check=on_check)
     result = analysis.search()
-    minimal = result.minimal_wavesets()
+
+minimal = result.minimal_wavesets()
 ```
 
-The number of numerical evaluations is unknown before the search because pruning
-resolves entire branches without checking their members. The demo therefore
-reports completed checks, elapsed time, and throughput rather than a misleading
-percentage or ETA based on the total powerset. Inspect `result.complete` for
-unresolved outcomes. tqdm is a development dependency, not a library dependency.
+`progress.total` is the exact number of candidate wavesets in the selected search
+size domain. `progress.completed` counts processed candidates, including cached
+decisions and compressed pruned branches. This lets tqdm display a percentage
+and estimated remaining time while preserving pruning; progress can jump by more
+than one waveset per callback. No powerset is expanded for progress reporting.
+
+Numerical evaluations can report unchanged completion counts until a branch is
+resolved. Their snapshots have `progress.evaluated=True`; branch-completion events
+have `False`. Outside searches, numerical checks report `phase="check"` and
+`completed=total=1`; cached or inferred direct checks remain silent. Use a separate
+bar per search. Reaching 100% means the traversal finished, including unresolved
+leaves; inspect `result.complete` for compatibility resolution. tqdm remains a
+development dependency, not a library dependency.
 
 The default uses up to two search threads on ordinary Python and up to eight when
 the GIL is disabled, bounded by available CPUs. Set `workers=1` for serial execution

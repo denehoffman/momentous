@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Generator
+from contextlib import contextmanager
 from copy import copy
-from dataclasses import fields
+from dataclasses import fields, replace
 from itertools import combinations
 
 import numpy as np
@@ -20,6 +21,7 @@ from momentous.geometry import (
 )
 from momentous.results import (
     Bound,
+    CheckProgress,
     CheckResult,
     ComplexArray,
     Diagnostic,
@@ -41,13 +43,14 @@ class Engine:
         n_sigma: float,
         tolerance: float,
         max_combination_size: int,
-        on_check: Callable[[Waveset, CheckResult], None] | None = None,
+        on_check: Callable[[Waveset, CheckResult, CheckProgress], None] | None = None,
     ) -> None:
         """Prepare shared covariance geometry and canonical wave indices."""
         self.pool, self.data = pool, data
         self.n_sigma, self.tolerance = n_sigma, tolerance
         self.max_combination_size = max_combination_size
         self.on_check = on_check
+        self._progress: CheckProgress | None = None
         self.errors = np.linalg.norm(data.factor, axis=1)
         self.stats = SolverStats()
         self._indices = {wave: index for index, wave in enumerate(pool.waves)}
@@ -166,10 +169,33 @@ class Engine:
         self._notify(mask, result)
         return result
 
-    def _notify(self, mask: int, result: CheckResult) -> None:
+    def _notify(
+        self, mask: int, result: CheckResult, *, evaluated: bool = True
+    ) -> None:
         """Deliver a completed evaluation after updating coordinating caches."""
         if self.on_check is not None:
-            self.on_check(self.members(mask), result)
+            progress = (
+                CheckProgress(1, 1)
+                if self._progress is None
+                else replace(self._progress, evaluated=evaluated)
+            )
+            self.on_check(self.members(mask), result, progress)
+
+    @contextmanager
+    def track_search(self, total: int) -> Generator[None, None, None]:
+        """Scope progress to one search and restore it after completion or error."""
+        previous = self._progress
+        self._progress = CheckProgress(0, total, phase="search", evaluated=False)
+        try:
+            yield
+        finally:
+            self._progress = previous
+
+    def report_progress(self, mask: int, result: CheckResult, completed: int) -> None:
+        """Report a disjoint processed branch without evaluating its members."""
+        assert self._progress is not None
+        self._progress = replace(self._progress, completed=completed, evaluated=False)
+        self._notify(mask, result, evaluated=False)
 
     def lookup(self, mask: int) -> CheckResult | None:
         """Return cached or inferred decisions without starting numerical work."""

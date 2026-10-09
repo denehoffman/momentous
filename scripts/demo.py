@@ -252,19 +252,30 @@ def main() -> None:
         f"Searching all subsets of {len(pool)} waves with moments through L={2 * args.max_wave_l}...",
         flush=True,
     )
-    with tqdm(desc="Waveset checks", unit="check") as progress:
+    with tqdm(desc="Wavesets", unit="waveset") as progress:
+
+        def on_check(
+            waves: mo.Waveset, result: mo.CheckResult, checked: mo.CheckProgress
+        ) -> None:
+            """Display search-domain progress, including candidates resolved by pruning."""
+            if checked.phase == "search":
+                progress.total = checked.total
+                progress.update(checked.completed - progress.n)
+
         analysis = mo.analyze(
             extraction.data,
             pool,
             n_sigma=args.n_sigma,
-            on_check=lambda waves, result: progress.update(),
+            on_check=on_check,
         )
         result = analysis.search()
-        minimal = result.minimal_wavesets()
+    minimal = result.minimal_wavesets()
     print(
         f"Passing: {result.count:,}/{result.candidate_count:,}; unresolved: {len(result.unresolved)}"
     )
-    print("Certified minimal sets:", minimal)
+    print(f"Certified minimal wavesets ({len(minimal)}):")
+    for index, waves in enumerate(minimal, start=1):
+        print(f"  {index:>3}. {waves}")
     print(result.stats)
 
 

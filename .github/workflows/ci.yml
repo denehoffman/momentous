@@ -1,0 +1,92 @@
+# yamloom: generated from .yamloom.py
+---
+name: CI
+"on":
+  push:
+    branches:
+      - main
+  pull_request: ~
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  checks:
+    name: "Lint, types, and workflows"
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v6
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - run: uv sync --locked
+      - run: uv run --locked prek run --all-files
+        env:
+          SKIP: pytest
+      - run: uv run --locked yamloom check
+      - run: git diff --exit-code
+    timeout-minutes: 10
+  tests:
+    name: Installed wheel / Python ${{ matrix.python }}
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python:
+          - "3.12"
+          - "3.13"
+          - "3.14"
+      fail-fast: false
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v6
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: ${{ matrix.python }}
+          enable-cache: true
+      - run: uv sync --locked --no-install-project
+      - name: Verify release version
+        if: ${{ (github.ref_type == 'tag') }}
+        run: |-
+          uv run --no-sync python - <<'PY'
+          import os
+          import tomllib
+          
+          with open("pyproject.toml", "rb") as source:
+              version = tomllib.load(source)["project"]["version"]
+          if os.environ["GITHUB_REF_NAME"] != f"v{version}":
+              raise SystemExit("Release tag must match the version in pyproject.toml")
+          PY
+      - name: Build the wheel from the source distribution
+        run: |-
+          uv build --sdist
+          uv build dist/*.tar.gz --wheel --out-dir dist
+          uv pip install --no-deps dist/*.whl
+      - name: Test the installed wheel and its docstrings
+        run: |-
+          uv run --no-sync python - <<'PY'
+          from pathlib import Path
+          
+          import momentous
+          import pytest
+          
+          package = Path(momentous.__file__).resolve().parent
+          if package.is_relative_to(Path("src").resolve()):
+              raise SystemExit("Tests must import the installed wheel")
+          raise SystemExit(pytest.main(["tests", str(package)]))
+          PY
+      - name: Upload Artifact
+        if: "matrix.python == '3.12'"
+        uses: actions/upload-artifact@v6
+        with:
+          path: dist/*
+          name: distributions
+    timeout-minutes: 20

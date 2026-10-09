@@ -25,6 +25,7 @@ from momentous.extraction import (
 )
 from momentous.results import (
     Bound,
+    CheckProgress,
     CheckResult,
     NormalizationWarning,
     ProjectionFailure,
@@ -40,6 +41,7 @@ __all__ = [
     "Acceptance",
     "AnalysisResult",
     "Bound",
+    "CheckProgress",
     "CheckResult",
     "Covariance",
     "EventGrouping",

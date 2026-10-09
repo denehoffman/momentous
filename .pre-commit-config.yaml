@@ -1,12 +1,32 @@
+minimum_pre_commit_version: '3.2.0'
 repos:
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.16.10
+  - repo: local
     hooks:
       - id: ruff-check
-        args: [--fix]
+        name: Ruff lint
+        entry: uv run --locked ruff check --fix
+        language: system
+        types_or: [python, pyi]
       - id: ruff-format
-  - repo: https://github.com/astral-sh/ty-pre-commit
-    rev: v0.0.85
-    hooks:
+        name: Ruff format
+        entry: uv run --locked ruff format
+        language: system
+        types_or: [python, pyi, markdown]
       - id: ty
-        args: [--isolated, --locked]
+        name: ty (full project)
+        entry: uv run --locked ty check
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: pytest
+        name: pytest and docstring examples
+        entry: uv run --locked pytest
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: yamloom-sync
+        name: yamloom sync
+        entry: uv run --locked yamloom sync
+        language: system
+        pass_filenames: false
+        files: ^(\.yamloom\.py|\.github/workflows/.*\.ya?ml|pyproject\.toml|uv\.lock)$

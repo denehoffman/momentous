@@ -1,376 +1,205 @@
 # momentous
 
-A Python 3.12+ library for covariance-aware angular-moment bounds, continuous
-partial-wave compatibility, waveset search, and acceptance-corrected moment extraction. One raw `MomentData` measurement
-can be reused across analyses; candidate views and searches share prepared checks.
+momentous is a Python library for extracting acceptance-corrected moments, checking partial-wave hypotheses, and finding the smallest compatible wavesets. It keeps uncertainties and correlations with your measurements throughout the analysis.
+
+The library supports unpolarized measurements and linear photon polarization. It requires Python 3.12 or newer.
+
+## Install with pip
+
+```sh
+pip install momentous
+```
+
+## Install with uv
+
+Add momentous to your project:
+
+```sh
+uv add momentous
+```
+
+You can also install from a local checkout:
+
+```sh
+uv add /path/to/momentous
+```
+
+To work on the library or run its demos, enter the checkout and install the
+development environment:
+
+```sh
+uv sync --locked
+uv run python scripts/demo.py
+```
+
+If you are new to uv, its [installation guide](https://docs.astral.sh/uv/getting-started/installation/) will get you started.
+
+## Start with a measurement
+
+Supply raw moments, their uncertainty, and the pool of waves you want to explore:
 
 ```python
 import momentous as mo
 
-h00, h11 = mo.Moment(0, 0), mo.Moment(1, 1)
-raw = {h00: 100.0, h11: 30.0 + 4.0j, (2, 0): 5.0}
-covariance = mo.Covariance.from_uncertainties({h00: 2.0, h11: 1.0 + 0.5j, (2, 0): 1.0})
-data = mo.MomentData(raw, covariance=covariance)
-analysis = mo.analyze(data, mo.Waveset.from_max_l(2))
+data = mo.MomentData(
+    {(0, 0): 100.0, (1, 1): 20.0 + 4.0j, (2, 0): -5.0},
+    covariance=mo.Covariance.from_uncertainties(
+        {(0, 0): 2.0, (1, 1): 1.0 + 0.5j, (2, 0): 1.0}
+    ),
+)
+pool = mo.Waveset.from_max_l(2)
+analysis = mo.analyze(data, pool)
 
 candidate = analysis.for_waves(mo.Waveset([(0, 0), (1, 1)]))
 print(candidate.status())
 print(candidate.check(diagnostics=True))
 print(candidate.bounds())
+
+h11 = mo.Moment(1, 1)
 region = candidate.region(h11.real, h11.imag)
 
 search = analysis.search(max_size=3)
-print(search.count, search.candidate_count, search.complete)
+print(search.count)
 print(search.minimal_wavesets())
 ```
 
-Passing is a necessary moment-compatibility condition, not proof that one set of
-amplitudes simultaneously fits all supplied moments.
+Wave labels use spectroscopic notation: `Wave(2, 2, "+")` prints as `D+2(+)`, where the signed projection follows the orbital label and the reflectivity is in parentheses. Moments print as `H(2, 1)`; polarized variants retain their superscript, such as `Im H^2(2, 1)`. A waveset prints its canonically ordered wave labels, for example `{S0(+), D+2(+)}`.
 
-## Measurements and uncertainty
+The analysis checks individual scalar components and every pair by default, using `n_sigma=3`. A passing candidate satisfies these necessary moment constraints; it does **not** establish that one simultaneous amplitude fit exists. A numerical failure to resolve a check produces an explicit `unresolved` status.
 
-`MomentData(raw, covariance=...)` validates normalization, polarization, values,
-and uncertainty coverage at construction and owns immutable snapshots. It accepts
-`Moment` or tuple keys. `data.moments` and `data.values` retain raw values;
-`analysis.moments`, `analysis.values`, and `analysis.covariance` are normalized.
-Both expose `component_labels` and `observables` in scalar-vector order.
+Search is a separate step, so you can inspect a candidate or its geometry first. Prepared operators and completed checks are reused across candidates and searches. `minimal_wavesets()` certifies minimality within the chosen search size limits.
 
-Every measurement requires raw `(0, 0)` or polarized `(0, 0, 0)`.
-Compatibility analysis also requires at least one other moment; yield-only
-extraction is valid. Selected higher moments are allowed; complete multiplets are
-not required. Pre-normalized input is unsupported. H00=1 still uses the raw
-convention; numbers alone cannot reveal a different normalization, conjugation,
-frame, or polarized sign convention.
+You can select results that contain particular waves and omit others:
 
-There is one uncertainty argument with three constructors:
+```python
+required = mo.Waveset([(0, 0), (1, 1)])
+forbidden = mo.Waveset([(2, 0)])
+for waves in search.wavesets(include=required, exclude=forbidden):
+    print(waves)
+
+minimal = search.minimal_wavesets(include=required, exclude=forbidden)
+```
+
+`include` requires all listed waves; `exclude` forbids any listed wave. These filters retain the original search size limits. Filtering minima selects among the original certified minima; it does not redefine minimality with the required waves forced into each candidate.
+
+## Moments and uncertainties
+
+Every measurement must include raw `(0, 0)`, or `(0, 0, 0)` for polarized input. Other moment labels may be selected as needed; complete multiplets are not required. momentous divides by this positive, real normalization moment and propagates its correlations using a first-order Jacobian. Pre-normalized input is unsupported.
+
+The convention is the same Wigner-D convention in both modes: `D_LM = d_LM(theta) * exp(-1j*M*phi)`. At full acceptance, unpolarized raw moments are `sum(w * D_LM)`, with `H00 = sum(w)`. Frame, phase, and polarized sign conventions must match the library; requiring raw input cannot detect a convention mismatch. The [`analyze` docstring](src/momentous/analysis.py) gives the estimators, including a short example.
+
+Choose the covariance constructor that describes your measurement:
+
+- `Covariance.from_uncertainties(...)` takes independent standard deviations for every supplied moment, including the normalizer. For unpolarized moments, `1.0 + 0.5j` means separate real and imaginary deviations.
+- `Covariance(matrix, components=...)` takes a full, explicitly labeled **real** covariance matrix. Each unpolarized moment has a real and an imaginary slot,
+  even when its measured value is real. Polarized moments have one scalar slot.
+- `Covariance.exact()` declares exact input.
+
+For example, correlations between the normalizer and a complex moment can be specified directly:
 
 ```python
 import numpy as np
 
-# Full covariance with explicit scalar row/column labels.
 h00, h11 = mo.Moment(0, 0), mo.Moment(1, 1)
-matrix = np.diag([4.0, 0, 1.0, 0.25])
+matrix = np.diag([4.0, 0.0, 1.0, 0.25])
 matrix[0, 2] = matrix[2, 0] = 0.5
 covariance = mo.Covariance(matrix, components=[h00.real, h00.imag, h11.real, h11.imag])
 data = mo.MomentData({h00: 100.0, h11: 30.0 + 4.0j}, covariance=covariance)
-
-# Independent deviations must explicitly cover every supplied moment.
-independent = mo.Covariance.from_uncertainties({h00: 2.0, h11: 1.0 + 0.5j})
-independent_data = mo.MomentData(data.moments, covariance=independent)
-
-# Exact values require no repeated labels or zero arrays.
-exact_data = mo.MomentData(data.moments, covariance=mo.Covariance.exact())
 ```
 
-For `n` unpolarized moments the full covariance has real shape `(2*n, 2*n)`.
-Every moment occupies Re/Im slots, even if its measured value is real. A zero
-imaginary measurement need not have zero uncertainty, except for the normalizer.
-Labels describe matrix order; analysis aligns them to mapping order, preserving
-all Re/Im and inter-moment correlations. Exact components have zero covariance
-rows and columns. An ordinary complex `(n, n)` covariance cannot encode these
-relationships without pseudo-covariance information and is rejected; see
-[Neeser and Massey (1993)](https://www.isiweb.ee.ethz.ch/archive/massey_pub/pdf/BI437.pdf).
+See the [input and uncertainty reference](docs/usage.md#measurements-and-uncertainty) for covariance ordering, singular uncertainties, and normalization assumptions.
 
-Polarized values are real observables with real covariance shape `(n, n)`.
-Covariance must be finite, symmetric, and positive semidefinite; singular and
-very small positive variances are supported. It describes the raw values supplied.
+## Extract moments from events
 
-For independent unpolarized deviations, `0.1 + 0.2j` means separate Re/Im standard
-deviations. A real deviation declares exact Im. All correlations are assumed zero;
-use explicit zeros for exact entries and provide every moment, including H00.
-Polarized deviations must be real. Standard deviations are retained without
-squaring during normalization, preserving extreme common unit rescalings.
+Build three separate samples: data, generated MC, and accepted MC. An `Acceptance` object describes their response and the statistical relationship between the MC samples.
 
-Both modes use Wigner-D moments: raw normalization divides unpolarized H(L,M)
-by H00 and polarized H^alpha(L,M) by H^0(0,0). The denominator must be positive and real; imaginary
-unpolarized H00 must be exact zero. Its normalized value is exactly one with
-zero variance. Complete raw covariance propagates through the analytic first-order
-Jacobian as `J @ V @ J.T`, retaining denominator correlations. This is a local
-ratio approximation; see [NIST's law of propagation of uncertainty](https://www.nist.gov/pml/nist-technical-note-1297/nist-tn-1297-appendix-law-propagation-uncertainty).
-`NormalizationWarning` flags a relative normalizer uncertainty of at least 1/3.
-Absence of the warning is not an accuracy guarantee.
-
-Raw moments use `D_LM = d_LM(theta) * exp(-1j*M*phi)` in both modes.
-Unpolarized full-acceptance estimates are `sum(w * D_LM)`, with H00=`sum(w)`.
-Convert earlier unit-normalized harmonic inputs with
-`sqrt(4*pi/(2*L+1))` per raw value and covariance row/column; the normalized
-predictions remain unchanged. The `analyze` docstring provides the explicit
-full-acceptance estimators and a laddu example.
-
-## Extracting moments with acceptance
-
-`EventSample(source, ...)` accepts laddu datasets, mappings, structured NumPy
-arrays, and tables with named column access. Supply numerical arrays directly by
-omitting the source. The interface is the same for every input type.
-No file format is required. All three samples must share the analysis frame;
-accepted MC uses truth angles. MC must match the beam exposure and relevant
-kinematic distribution. Reconstruction and wrong-hypothesis migration are outside
-this acceptance-only model.
-
-The workflow has three separately constructed samples and one response. For laddu datasets,
-stored weights are used automatically; supply your own frame expressions when
-angles are not already named columns:
+With `laddu` datasets, supply expressions for your analysis frame and identify the column or columns that represent a physical event:
 
 ```python
 import laddu as ld
-
-# Choose your own event-column names; none are assumed by the library.
-events = ("run_number", "event_number")
-beam = mo.Polarization()  # Reads P and Phi; omit for unpolarized samples.
+import momentous as mo
 
 
+# Define costheta_expression and phi_expression for your own analysis frame.
 def sample(path):
     return mo.EventSample(
         ld.read_parquet(path),
         costheta=costheta_expression,
         phi=phi_expression,
-        events=events,
-        polarization=beam,
+        events=("run_number", "event_number"),
     )
 
 
 generated = sample("generated.parquet")
 accepted = sample("accepted.parquet")
-data = sample("data.parquet")
-acceptance = mo.Acceptance(generated, accepted, basis=mo.MomentBasis(4, polarized=True))
-extraction = acceptance.extract(data)
-analysis = mo.analyze(
-    extraction.data, mo.Waveset.from_max_l(2, reflectivities=("+", "-"))
-)
-print(extraction.diagnostics, extraction.covariance_scope)
+data_events = sample("data.parquet")
+
+pool = mo.Waveset.from_max_l(2)
+acceptance = mo.Acceptance(generated, accepted, basis=mo.MomentBasis.from_waves(pool))
+extraction = acceptance.extract(data_events)
+analysis = mo.analyze(extraction.data, pool)
+search = analysis.search()
 ```
 
-`Acceptance` defaults to uniform angular generation and `MCStatistics.linked()`.
-Only this object declares the relationship between MC samples: linking checks
-shared physical-event IDs and supplied truth angles and beam information.
-Accepted MC must provide its own truth coordinates; sample construction never
-copies or replaces them. Rejected generated events need no accepted row.
-Specify `MCStatistics.independent()` for genuinely independent Poisson MC, or
-`data_only()` to condition on the response and exclude MC uncertainty.
+`laddu`'s stored event weights are used automatically. Accepted rows can include multiple hypotheses for one physical event; give them the same event ID so that their covariance includes the cross terms.
 
-`MomentBasis(max_L=4, polarized=False)` defines the complete expansion.
-Omitting `basis` in `Acceptance` uses L=4 and the generated sample's polarization
-mode. These defaults are scientific assumptions; change them when your generation
-or intensity expansion differs.
+For polarized extraction, give each sample a `polarization=mo.Polarization(...)` and use `Waveset.from_max_l(2, reflectivities=("+", "-"))`. `Polarization()` reads `P` and `Phi` by default; custom columns, arrays, and `laddu` expressions work too. `MomentBasis.from_waves(pool)` includes the required ranks and polarization mode.
 
-`EventSample` reads `costheta` and `phi` by default. The polar cosine must lie in
-[-1, 1]; azimuth is radians. Wigner-D evaluation converts to theta internally.
-`Polarization()` reads `P` and `Phi`, or accepts custom column names, numerical arrays, or laddu expressions.
-Magnitude is a fraction in [0, 1], orientation is radians relative to the
-production plane, and only linear photon polarization is currently supported.
-Zero polarization is allowed, but sufficient overall sensitivity is required.
-laddu expressions evaluate together in one traversal, using double-precision JIT
-without thread limits by default.
-
-Event grouping is **required**. A string names one ID column; a tuple names a
-compound key, such as `(run, event)`. Integers and strings retain exact identity.
-Exclude combo numbers: hypotheses of one physical event must share an ID.
-For arrays, use `EventGrouping.from_ids(ids)`; when each row is an independent
-physical event, explicitly use `EventGrouping.independent_rows()`.
-Data IDs have their own namespace and need not match MC.
-
-The same interface works with other sources:
+The same sample constructor accepts mappings, structured NumPy arrays, and tables with named column access:
 
 ```python
-# A dictionary, structured NumPy array, or table with source[name] access.
 generated = mo.EventSample(generated_columns, events="parent_id", weights="weight")
 accepted = mo.EventSample(accepted_columns, events="parent_id", weights="weight")
-data = mo.EventSample(data_columns, events="data_id", weights="weight")
-extraction = mo.Acceptance(generated, accepted).extract(data)
+data_events = mo.EventSample(data_columns, events="data_id", weights="weight")
+extraction = mo.Acceptance(generated, accepted).extract(data_events)
 ```
 
-For ordinary sources, omitted weights mean unit weights. Arrays can also be
-supplied directly as `costheta=...`, `phi=...`, and `weights=...`, without a source.
-Never rescale hypothesis weights to sum to one: covariance sums outer products
-of physical-event contributions, retaining cross terms between hypotheses.
-Negative data subtraction weights are allowed; MC weights must be nonnegative.
-Weight-estimation and calibration nuisance errors are not inferred from columns.
-See [the complete extraction workflow](docs/extraction.md#using-laddu-datasets)
-for linked MC, polarized moments, and input conventions.
+Samples use `costheta` and `phi`, with azimuth in radians. Without a source, you can pass numerical arrays directly and group them with `EventGrouping.from_ids(ids)`.
 
-`MomentBasis.from_waves(pool)` includes every rank through twice the largest
-wave rank. Extraction fits the complete basis, including nuisance coordinates,
-and restores signed projections and exact zeros with their covariance. Omitted
-higher intensity components can bias fitted moments through angular mixing.
+By default, acceptance assumes uniform angular generation and linked MC. Use `MCIntegration.importance(...)` for a known nonuniform generation density or `MCStatistics.independent()` for genuinely independent MC samples. The [extraction guide](docs/extraction.md) explains weights, polarization, MC exposure, and uncertainty propagation.
 
-`MCIntegration.uniform()` is the default and assumes uniform decay-angle
-generation with matching beam exposure. For a known nonuniform density, use
-`MCIntegration.importance(relative_density=expression)` with sample scalars
-`costheta`, `phi`, and polarized `P`, `Phi`. It divides both MC samples by that
-density; do not also include inverse density in their weights.
-Accepted weights are divided by **generated exposure**, preserving efficiency.
+## Follow search progress
 
-MC uncertainty follows the policy selected in `Acceptance`:
-
-- `MCStatistics.data_only()` conditions on the response and excludes MC errors.
-- `MCStatistics.independent()` requires genuinely independent Poisson MC samples
-  with comparable exposure; missing matching IDs do not establish independence.
-- `MCStatistics.linked()` (the default) matches grouped IDs to a fixed-size
-  generated sample, retaining generated/accepted and hypothesis correlations. Every accepted ID
-  must have a generated counterpart; rejected events need no accepted row.
-
-The result exposes `.data`, `.measured`, `.response`, `.data_covariance`,
-`.mc_covariance`, and response diagnostics. Covariance propagation is first-order.
-Singular or poorly conditioned responses raise `ExtractionError` with their
-singular values; no coordinates are silently dropped or regularized.
-See [the extraction derivation](docs/extraction.md) for the complete weighted
-estimator, statistical assumptions, and covariance equations.
-
-## Wave pools and scalar observables
-
-`Waveset` is an immutable canonical basis. `.waves` contains its individual waves;
-`len(pool)` counts them. Iteration lazily yields **nonempty subset Wavesets**.
-Powerset enumeration has exponential total size.
-
-```python
-pool = mo.Waveset([(0, 0), (1, 0), (1, 1)])
-for waves in pool.powerset(min_size=1, max_size=2):
-    print(waves)
-
-unpolarized = mo.Waveset.from_max_l(2)
-positive = mo.Waveset.from_max_l(2, reflectivities=("+",))
-both_sectors = mo.Waveset.from_max_l(2, reflectivities=("+", "-"))
-```
-
-Generated pools include all signed projections. The single `reflectivities`
-argument selects sectors; omission means unpolarized, and empty or duplicate
-sectors are rejected. Explicit wavesets infer their mode from their waves. An
-empty set can preserve mode with `Waveset([], polarized=True)`.
-
-Quantum numbers accept integers, floats, `Fraction`, or laddu L/M and convert
-internally. Orbital ranks and allowed projections are integral. Nonphysical
-fractions, duplicate waves, and mixed polarization are rejected.
-
-`Moment.real` and `Moment.imag` select real scalar `Observable` objects. They
-work as covariance labels and region axes; canonical `(L,M,"real"/"imag")` tuple
-shorthand remains accepted. Bounds retain canonical tuple keys, available through
-`observable.key`. A polarized `Moment(L,M,variant)` already denotes a scalar.
-Variant 2 means Im H^2, not a complex H^2 value; its `.imag` is consequently invalid.
-
-```python
-h0, h1, h2 = mo.Moment(0, 0, 0), mo.Moment(0, 0, 1), mo.Moment(1, 1, 2)
-data = mo.MomentData(
-    {h0: 100.0, h1: 90.0, h2: 0.0},
-    covariance=mo.Covariance(np.diag([4, 4, 1]), components=[h0, h1, h2]),
-)
-polarized = mo.analyze(data, mo.Waveset.from_max_l(1, reflectivities=("+", "-")))
-region = polarized.region(h1, h2)
-```
-
-Signs follow [Mathieu et al. (2019), Eq. (13)](https://arxiv.org/abs/1906.04841):
-a pure positive-reflectivity S wave has H^1(0,0)/H^0(0,0)=+1.
-
-## Checks, candidate views, and geometry
-
-`analyze` prepares normalized geometry and checks the full pool. It accepts
-independent numerical settings: `max_combination_size=2`, `n_sigma=3`, and
-`tolerance=1e-8`. Size 1 checks individual scalar components; size 2 additionally
-checks every continuous pair, including Re/Im of one moment and cross-variant
-polarized pairs. Larger sizes are explicitly unsupported. There is no sampled
-compatibility method. `n_sigma` is not a joint confidence level or p-value;
-`tolerance` is separate absolute slack in normalized coordinates.
-
-`analysis.for_waves(waves)` validates membership once and returns a candidate view
-with `status()`, `check()`, `operators()`, `bounds()`, and `region(...)`. It shares
-analysis caches. The analysis also provides these operations with an optional
-candidate argument. Empty candidates check incompatible and have no geometry.
-
-Checks return `compatible`, `incompatible`, or `unresolved`. Compare statuses
-explicitly; their Boolean conversion raises. `check(...).valid` and Boolean check
-conversion raise for unresolved outcomes. With `diagnostics=True`, a check returns
-complete `ProjectionFailure` records for verified exclusions and `UnresolvedPair`
-records with an available reason. Unresolved records claim no projection witness.
-Detailed checks evaluate the actual candidate even when status could be inferred.
-
-Operators follow `candidate.waves.waves` order. Polarized operators use a whitened
-normalization metric. Regions return labels, measured point, covariance, support
-normals/values, and an inner boundary approximation. `n_directions=360` changes
-boundary display resolution only; point, segment, and flat-face degeneracies are
-supported. Regions never determine compatibility verdicts. Advanced array-based
-checks remain available as `momentous.geometry.check_pair`.
-
-## Explicit subset search
-
-```python
-pool = mo.Waveset.from_max_l(1)
-data = mo.MomentData({(0, 0): 1, (1, 0): 0}, covariance=mo.Covariance.exact())
-analysis = mo.analyze(data, pool)
-search = analysis.search(min_size=1, max_size=3)
-for waves in search.wavesets(status="compatible"):
-    print(waves)
-minimal = search.minimal_wavesets()
-```
-
-`SearchResult` owns `count`, `candidate_count`, `size_limits`, `complete`,
-`unresolved`, `status(waves)`, `wavesets(status=...)`, and `minimal_wavesets()`.
-Its `.analysis` refers to the prepared analysis. Repeated searches can use different
-size domains while reusing numerical certificates. Search lookup requires its
-selected domain; `analysis.check(waves)` and candidate views accept any pool subset.
-
-Search retains compressed disjoint passing blocks. Counts and lookup do not expand
-supersets; enumeration is lazy, but output and worst-case search remain exponential.
-Unresolved outcomes never establish passes or exclusions and never prune branches.
-Minimal sets are certified by proving every admissible immediate subset incompatible.
-Unresolved smaller subsets prevent certification, and incomplete search may omit
-true minima. Minimality is relative to `size_limits`. See [algorithm notes](docs/algorithms.md).
-
-Supply an `on_check(waves, result)` callback to observe numerical evaluations.
-It receives immutable `Waveset` and `CheckResult` objects after the initial pool
-check, direct checks, search evaluations, and minimal-set certification. Cached
-and inferred decisions do not emit events. Callbacks run on the calling thread,
-including parallel searches, and exceptions propagate after caching the completed
-check. Choose any progress-display library, for example tqdm:
+Bring your preferred progress library. The callback receives a `CheckProgress` snapshot with `completed` and `total`, on the calling thread even during parallel searches. Update the bar from those absolute counts:
 
 ```python
 from tqdm.auto import tqdm
 
-with tqdm(desc="Waveset checks", unit="check") as progress:
-    analysis = mo.analyze(data, pool, on_check=lambda waves, result: progress.update())
+with tqdm(desc="Wavesets", unit="waveset") as bar:
+
+    def on_check(waves, result, progress):
+        if progress.phase == "search":
+            bar.total = progress.total
+            bar.update(progress.completed - bar.n)
+
+    analysis = mo.analyze(data, pool, on_check=on_check)
     search = analysis.search(workers=2)
-    minimal = search.minimal_wavesets()
+
+minimal = search.minimal_wavesets()
 ```
 
-Pruning makes the number of numerical evaluations unknown in advance. This display
-reports completed checks and throughput; using the entire powerset as its total
-would give a misleading fraction and ETA. Inspect `search.complete` for unresolved
-outcomes. Momentous has no progress-display dependency; tqdm is used by the demo.
+The total includes every waveset within the search's size limits. Pruning or cached decisions can resolve several at once, making the bar jump without additional numerical evaluations. `progress.evaluated` identifies new numerical checks; outside searches those report `phase="check"` and `completed=total=1`. Use a new bar for each search, and inspect `search.complete` for unresolved results even when progress reaches 100%. See the [search reference](docs/usage.md#explicit-subset-search) and [performance notes](docs/performance.md) for worker settings and free-threaded Python behavior.
 
-`workers=1` selects serial search. By default, ordinary Python uses up to two workers and
-Python with the GIL disabled uses up to eight workers. Explicit thread counts work
-on either build, and workers share prepared inputs while owning their solver
-templates. Additional threads can increase overhead; benchmark your workload.
-CVXPY's current `_cvxcore` extension re-enables the GIL when loaded on free-threaded
-Python. Momentous respects that runtime behavior; numerical array operations can
-still run concurrently. laddu and native numerical thread settings are unchanged.
+## Try the demos and contribute
 
-## Development and examples
+The demo generates events with `laddu`, applies a detector cut, extracts moments, and scans all nonempty wavesets. Its amplitudes are fixed in the script, and moment ranks extend through twice `--max-wave-l`.
+
+```sh
+uv run python scripts/demo.py --events 20000 --mc-events 50000
+uv run python scripts/demo.py --polarized --max-wave-l 2 --n-sigma 3
+```
+
+To install the commit hook and run all checks:
 
 ```sh
 uv sync --locked
-uv run pytest
-uv run ruff check .
-uv run ruff format --check .
-uv run ty check
-uv run pre-commit install
-uv run pre-commit run --all-files
-uv run python scripts/demo.py --events 20000 --mc-events 50000
-uv run python scripts/demo.py --polarized --max-wave-l 2
-uv run python scripts/benchmark.py --pool-l 2 --mc-events 50000
-uv run python scripts/benchmark.py --polarized --pool-l 2 --workers 1 --workers 2 --time-limit 600
+uv run prek install
+uv run prek run --all-files
 ```
 
-Focused pytest tests and executable NumPy-style docstrings preserve distinct
-scientific guarantees; there is no coverage quota. Ruff and ty are pinned in the
-development dependencies and hooks. The demo has five options: `--polarized`, `--events`, `--mc-events`,
-`--max-wave-l`, and `--n-sigma`. Its S/P/D truth amplitudes are fixed in the code (both reflectivities when polarized),
-moments extend through twice the largest wave rank, and search includes all
-nonempty subsets of the pool. It generates full laddu events and applies a detector cut and returns acceptance-corrected MomentData with full
-data and linked-MC covariance. Phase-space MC is unweighted with a proven
-envelope, and generated indices are retained through selection. laddu generation
-and evaluation use `Execution("jit", precision="f64")` without a thread limit. The benchmark
-reuses the measurement and prepared analysis and runs public workflows in processes
-with wall-clock limits. Historical benchmark artifacts describe earlier interfaces.
-The demo displays search progress automatically. The benchmark's repeatable
-`--workers` option compares thread counts against the same extracted measurement.
-See [performance notes](docs/performance.md) for measured runtimes and free-threaded
-Python behavior.
+prek (or your favorite pre-commit tool) runs Ruff lint and formatting, ty, pytest (including docstring examples), and yamloom sync using the versions in `uv.lock`. Edit `.yamloom.py` to change GitHub workflows, then run `uv run yamloom sync`. CI also checks the installed wheel on Python 3.12, 3.13, and 3.14.
+
+For more detail, see the [API and conventions reference](docs/usage.md), [algorithm notes](docs/algorithms.md), and [release guide](docs/releasing.md).
+
+> [!NOTE]
+> This library was developed with the help of Codex

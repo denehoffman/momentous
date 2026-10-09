@@ -29,6 +29,34 @@ class Block:
     required: int
     allowed: int
 
+    def count(self, minimum: int, maximum: int) -> int:
+        """Count this branch's size-limited candidates without expanding subsets."""
+        required, allowed = self.required.bit_count(), self.allowed.bit_count()
+        return sum(
+            comb(allowed - required, size - required)
+            for size in range(max(minimum, required), min(maximum, allowed) + 1)
+        )
+
+    def restrict(self, include: int, exclude: int) -> Block | None:
+        """Intersect a branch with required and forbidden wave masks."""
+        required, allowed = self.required | include, self.allowed & ~exclude
+        return None if required & ~allowed else Block(required, allowed)
+
+    def members(
+        self, minimum: int, maximum: int, *, smallest_only: bool = False
+    ) -> Iterator[int]:
+        """Yield branch members in cardinality and canonical-wave order."""
+        required = self.required.bit_count()
+        free = self.allowed & ~self.required
+        bits = [1 << i for i in range(free.bit_length()) if free & (1 << i)]
+        lower = max(minimum, required)
+        upper = min(maximum, self.allowed.bit_count())
+        if smallest_only:
+            upper = min(upper, lower)
+        for size in range(lower, upper + 1):
+            for extra in combinations(bits, size - required):
+                yield self.required | sum(extra)
+
 
 @dataclass(frozen=True)
 class Search:
@@ -42,17 +70,7 @@ class Search:
     @property
     def count(self) -> int:
         """Count compatible subsets combinatorially without expanding blocks."""
-        return sum(
-            comb(
-                block.allowed.bit_count() - block.required.bit_count(),
-                size - block.required.bit_count(),
-            )
-            for block in self.blocks
-            for size in range(
-                max(self.minimum, block.required.bit_count()),
-                min(self.maximum, block.allowed.bit_count()) + 1,
-            )
-        )
+        return sum(block.count(self.minimum, self.maximum) for block in self.blocks)
 
     def status(self, mask: int) -> Status:
         """Look up a candidate within the searched cardinality domain."""
@@ -68,21 +86,10 @@ class Search:
             return Status.COMPATIBLE
         return Status.UNRESOLVED if mask in self.unresolved else Status.INCOMPATIBLE
 
-    def passing(self, *, smallest_only: bool = False) -> Iterator[int]:
-        """Expand blocks lazily, optionally yielding only their smallest members."""
-
-        def expand(block: Block) -> Iterator[int]:
-            """Yield one block in cardinality and canonical-wave order."""
-            required = block.required.bit_count()
-            free = block.allowed & ~block.required
-            bits = [1 << i for i in range(free.bit_length()) if free & (1 << i)]
-            lower = max(self.minimum, required)
-            upper = (
-                lower if smallest_only else min(self.maximum, block.allowed.bit_count())
-            )
-            for size in range(lower, upper + 1):
-                for extra in combinations(bits, size - required):
-                    yield block.required | sum(extra)
+    def passing(
+        self, *, smallest_only: bool = False, include: int = 0, exclude: int = 0
+    ) -> Iterator[int]:
+        """Restrict compressed blocks before lazily expanding their members."""
 
         def order(mask: int) -> tuple[int, tuple[int, ...]]:
             """Order candidates independently of parallel branch completion."""
@@ -90,7 +97,18 @@ class Search:
                 i for i in range(mask.bit_length()) if mask & (1 << i)
             )
 
-        yield from merge(*(expand(block) for block in self.blocks), key=order)
+        restricted = (
+            selected
+            for block in self.blocks
+            if (selected := block.restrict(include, exclude)) is not None
+        )
+        yield from merge(
+            *(
+                block.members(self.minimum, self.maximum, smallest_only=smallest_only)
+                for block in restricted
+            ),
+            key=order,
+        )
 
     def minimal(self, engine: Engine) -> tuple[int, ...]:
         """Certify minimal passes by excluding every admissible immediate subset."""
@@ -202,43 +220,123 @@ class SearchResult:
         """
         return self._found.status(self.analysis._engine.mask(waves))
 
-    def wavesets(self, status: Status | str = Status.COMPATIBLE) -> Iterator[Waveset]:
-        """Lazily enumerate searched candidates with a selected status.
+    def wavesets(
+        self,
+        status: Status | str = Status.COMPATIBLE,
+        *,
+        include: Waveset | None = None,
+        exclude: Waveset | None = None,
+    ) -> Iterator[Waveset]:
+        """Lazily enumerate searched candidates matching a status and wave filters.
 
         Parameters
         ----------
         status : Status or str, default 'compatible'
-            Decision to enumerate; output can be exponential.
+              Decision to enumerate; output can be exponential.
+        include : Waveset, optional
+            Require every wave in this set. Omission or an empty set imposes
+            no inclusion constraint.
+        exclude : Waveset, optional
+            Omit every candidate containing any wave in this set. Omission or
+            an empty set imposes no exclusion constraint.
 
         Yields
         ------
         Waveset
-            Immutable candidates in deterministic order.
+              Immutable matching candidates in deterministic order.
+
+        Raises
+        ------
+        ValueError
+            If a filter contains a wave outside the pool, has a different
+            polarization mode, or includes and excludes the same wave.
+        TypeError
+            If a filter is not a Waveset.
+
+        Notes
+        -----
+        Filters retain the original search's size limits and statuses. They
+        do not rerun checks or change ``count``, ``complete``, or progress.
+        Compatible blocks are restricted before expansion, avoiding enumeration
+        of nonmatching supersets. Impossible cardinality constraints yield no
+        candidates. Validation occurs when the iterator is advanced.
+
+        Examples
+        --------
+        >>> from momentous import Covariance, MomentData, Waveset, analyze
+        >>> pool = Waveset([(0, 0), (1, 0), (1, 1)])
+        >>> data = MomentData({(0, 0): 1, (1, 0): 0}, covariance=Covariance.exact())
+        >>> result = analyze(data, pool).search()
+        >>> required = Waveset([(0, 0)])
+        >>> forbidden = Waveset([(1, 1)])
+        >>> list(result.wavesets(include=required, exclude=forbidden))
+        [Waveset([(0, 0)]), Waveset([(0, 0), (1, 0)])]
         """
         requested = Status(status)
+        included, excluded = self._filter_masks(include, exclude)
         if requested is Status.COMPATIBLE:
-            for mask in self._found.passing():
+            for mask in self._found.passing(include=included, exclude=excluded):
                 yield self.analysis._engine.members(mask)
         elif requested is Status.UNRESOLVED:
-            yield from self.unresolved
+            for mask in sorted(self._found.unresolved):
+                if mask & included == included and not mask & excluded:
+                    yield self.analysis._engine.members(mask)
         else:
-            for candidate in self.pool.powerset(*self.size_limits):
-                if self.status(candidate) is requested:
-                    yield candidate
+            domain = Block(0, (1 << len(self.pool)) - 1).restrict(included, excluded)
+            if domain is not None:
+                for mask in domain.members(*self.size_limits):
+                    if self._found.status(mask) is requested:
+                        yield self.analysis._engine.members(mask)
 
-    def minimal_wavesets(self) -> tuple[Waveset, ...]:
-        """Return passes whose admissible proper subsets are proved incompatible.
+    def minimal_wavesets(
+        self, *, include: Waveset | None = None, exclude: Waveset | None = None
+    ) -> tuple[Waveset, ...]:
+        """Return certified minimal passes matching optional wave filters.
+
+        Parameters
+        ----------
+        include : Waveset, optional
+            Require every listed wave in a returned minimum.
+        exclude : Waveset, optional
+            Require every listed wave to be absent from a returned minimum.
 
         Returns
         -------
         tuple of Waveset
-            Certified minimal sets relative to size_limits. Unresolved smaller
-            subsets prevent certification; incomplete searches may omit minima.
+              Certified minimal sets relative to size_limits. Unresolved smaller
+              subsets prevent certification; incomplete searches may omit minima.
+
+        Raises
+        ------
+        ValueError
+            If a filter contains a wave outside the pool, has a different
+            polarization mode, or includes and excludes the same wave.
+        TypeError
+            If a filter is not a Waveset.
+
+        Notes
+        -----
+        These filters select among the original search's certified minima.
+        They do not redefine minimality under forced wave inclusion. A matching
+        compatible candidate can exist even when no original minimum matches.
         """
+        included, excluded = self._filter_masks(include, exclude)
         return tuple(
             self.analysis._engine.members(mask)
             for mask in self._found.minimal(self.analysis._engine)
+            if mask & included == included and not mask & excluded
         )
+
+    def _filter_masks(
+        self, include: Waveset | None, exclude: Waveset | None
+    ) -> tuple[int, int]:
+        """Validate pool membership and reject contradictory wave constraints."""
+        engine = self.analysis._engine
+        included = 0 if include is None else engine.mask(include)
+        excluded = 0 if exclude is None else engine.mask(exclude)
+        if included & excluded:
+            raise ValueError("A wave cannot be both included and excluded")
+        return included, excluded
 
     def __repr__(self) -> str:
         """Summarize searched sizes and verdict counts without enumerating subsets."""
@@ -261,6 +359,8 @@ class _Traversal:
         """Initialize an exclusion-first traversal over the selected size domain."""
         self.engine, self.minimum, self.maximum = engine, minimum, maximum
         self.stack = [Block(0, (1 << len(engine.pool)) - 1)]
+        self.total = self.stack[0].count(minimum, maximum)
+        self.completed = 0
         self.blocks: list[Block] = []
         self.unresolved: set[int] = set()
 
@@ -277,20 +377,29 @@ class _Traversal:
                 return required
             if result.status is Status.COMPATIBLE:
                 self.blocks.append(branch)
+                self._complete(branch, required, result)
                 return None
         result = check(allowed)
         if result is None:
             return allowed
         if result.status is Status.INCOMPATIBLE:
+            self._complete(branch, allowed, result)
             return None
         elif required == allowed:
             self.unresolved.add(required)
+            self._complete(branch, allowed, result)
         else:
             undecided = allowed & ~required
             bit = undecided & -undecided
             self.stack.append(Block(required | bit, allowed))
             self.stack.append(Block(required, allowed ^ bit))
         return None
+
+    def _complete(self, branch: Block, mask: int, result: CheckResult) -> None:
+        """Advance progress by a terminal branch's domain cardinality."""
+        if self.engine.on_check is not None:
+            self.completed += branch.count(self.minimum, self.maximum)
+            self.engine.report_progress(mask, result, self.completed)
 
     def finish(self) -> Search:
         """Apply later certificates to unresolved leaves and freeze the search."""
@@ -383,9 +492,10 @@ def search(
     if workers < 1:
         raise ValueError("workers must be positive")
     traversal = _Traversal(engine, minimum, maximum)
-    if workers == 1:
-        while traversal.stack:
-            traversal.advance(traversal.stack.pop(), engine.check)
-    else:
-        _parallel(traversal, int(workers))
-    return traversal.finish()
+    with engine.track_search(traversal.total):
+        if workers == 1:
+            while traversal.stack:
+                traversal.advance(traversal.stack.pop(), engine.check)
+        else:
+            _parallel(traversal, int(workers))
+        return traversal.finish()

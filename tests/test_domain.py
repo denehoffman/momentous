@@ -88,11 +88,53 @@ def test_duplicate_or_mixed_wave_definitions_are_rejected(
         Waveset(definitions)
 
 
-def test_scientific_strings_and_constructor_representations() -> None:
-    assert str(Wave(0, 0, "+")) == "S_0^+"
-    assert repr(Wave(0, 0, "+")) == "Wave(0, 0, reflectivity='+')"
-    assert str(Moment(2, 1, variant=2)) == "Im H^2(2, +1)"
-    assert repr(Moment(2, 1, variant=2)) == "Moment(2, 1, variant=2)"
+@pytest.mark.parametrize(
+    "value,label,constructor",
+    [
+        (Wave(0, 0), "S0", "Wave(0, 0)"),
+        (Wave(2, 2, "+"), "D+2(+)", "Wave(2, 2, reflectivity='+')"),
+        (Wave(2, -2, "-"), "D-2(-)", "Wave(2, -2, reflectivity='-')"),
+        (Moment(2, -1), "H(2, -1)", "Moment(2, -1)"),
+        (Moment(0, 0, 0), "H^0(0, 0)", "Moment(0, 0, variant=0)"),
+        (Moment(2, 1, 1), "H^1(2, 1)", "Moment(2, 1, variant=1)"),
+        (Moment(2, 1, 2), "Im H^2(2, 1)", "Moment(2, 1, variant=2)"),
+        (
+            Moment(2, 1).real,
+            "Re H(2, 1)",
+            "Observable(Moment(2, 1), part='real')",
+        ),
+        (
+            Waveset([(1, 0), (0, 0)]),
+            "{S0, P0}",
+            "Waveset([(0, 0), (1, 0)])",
+        ),
+        (
+            Waveset([(2, 2, "+"), (0, 0, "-")]),
+            "{S0(-), D+2(+)}",
+            "Waveset([(0, 0, '-'), (2, 2, '+')])",
+        ),
+        (Waveset([]), "{}", "Waveset([])"),
+        (Waveset([], polarized=True), "{}", "Waveset([], polarized=True)"),
+    ],
+)
+def test_scientific_strings_and_constructor_representations(
+    value: Wave | Moment | Observable | Waveset, label: str, constructor: str
+) -> None:
+    assert str(value) == label
+    assert repr(value) == constructor
+    assert (
+        eval(
+            repr(value),
+            {
+                "__builtins__": {},
+                "Wave": Wave,
+                "Moment": Moment,
+                "Observable": Observable,
+                "Waveset": Waveset,
+            },
+        )
+        == value
+    )
 
 
 def test_scalar_observables_preserve_physical_identity_and_label_covariance() -> None:

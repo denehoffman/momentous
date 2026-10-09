@@ -10,4 +10,6 @@ wheels/
 .venv
 
 *.json
+!release-please-config.json
+!.release-please-manifest.json
 *.parquet

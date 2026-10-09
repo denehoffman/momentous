@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Literal
 
 import numpy as np
 from numpy.typing import NDArray
@@ -190,6 +191,53 @@ class CheckResult:
     def __repr__(self) -> str:
         """Summarize status and record count without listing every diagnostic."""
         return f"CheckResult(status={self.status.value!r}, diagnostics={len(self.diagnostics)})"
+
+
+@dataclass(frozen=True)
+class CheckProgress:
+    """An immutable progress snapshot supplied to an analysis callback.
+
+    Parameters
+    ----------
+    completed : int
+        Search-domain wavesets processed so far, including cached decisions,
+        compressed pruned branches, and unresolved leaves.
+    total : int
+        Number of wavesets in the selected search size domain.
+    phase : {'check', 'search'}, default 'check'
+        Search snapshots share one total per search. Numerical checks outside a
+        search, including minimal-set certification, report one completed check
+        with ``completed=total=1``.
+    evaluated : bool, default True
+        Whether this event reports a new numerical evaluation. Search also
+        reports branch-completion events with ``evaluated=False`` so that
+        progress includes candidates resolved without numerical work.
+
+    Notes
+    -----
+    ``completed`` counts processed search candidates, not compatible candidates
+    or solver calls. It reaches ``total`` even when results remain unresolved.
+    An evaluation may support a whole branch or occur outside the search size
+    limits, so evaluated events need not increment ``completed``. Use the
+    absolute counts to update a progress bar rather than adding one per event.
+
+    Examples
+    --------
+    >>> progress = CheckProgress(8, 15, phase='search', evaluated=False)
+    >>> print(progress)
+    search: 8/15 wavesets
+    >>> progress.completed, progress.total
+    (8, 15)
+    """
+
+    completed: int
+    total: int
+    phase: Literal["check", "search"] = "check"
+    evaluated: bool = True
+
+    def __str__(self) -> str:
+        """Return the phase and processed fraction without inferring compatibility."""
+        return f"{self.phase}: {self.completed}/{self.total} wavesets"
 
 
 @dataclass(frozen=True)

@@ -51,6 +51,12 @@ class Wave:
     >>> from fractions import Fraction
     >>> Wave(Fraction(2), -1, reflectivity="+")
     Wave(2, -1, reflectivity='+')
+    >>> print(Wave(2, 2, reflectivity="+"))
+    D+2(+)
+    >>> print(Wave(2, -2, reflectivity="-"))
+    D-2(-)
+    >>> print(Wave(0, 0))
+    S0
     """
 
     L: ld.L
@@ -82,17 +88,32 @@ class Wave:
         )
 
     def __str__(self) -> str:
-        """Return compact spectroscopic notation."""
+        """Return the orbital label, signed projection, and optional reflectivity.
+
+        Returns
+        -------
+        str
+            A spectroscopic label such as ``D+2(+)`` or ``S0``. The orbital
+            label comes from laddu.L; zero projections have no sign.
+        """
+        projection = int(self.M.value)
+        label = f"{projection:+d}" if projection else "0"
         sign = (
             ""
             if self.reflectivity is None
             else ("+" if self.reflectivity.value == 1 else "-")
         )
-        sector = "" if not sign else f"^{sign}"
-        return f"{self.L}_{int(self.M.value)}{sector}"
+        sector = "" if not sign else f"({sign})"
+        return f"{self.L}{label}{sector}"
 
     def __repr__(self) -> str:
-        """Return an explicit constructor representation."""
+        """Return a constructor expression with canonical numeric quantum numbers.
+
+        Returns
+        -------
+        str
+            An expression such as ``Wave(2, 2, reflectivity='+')``.
+        """
         sector = ""
         if self.reflectivity is not None:
             sign = "+" if self.reflectivity.value == 1 else "-"
@@ -126,7 +147,9 @@ class Moment:
     >>> Moment(1.0, 0)
     Moment(1, 0)
     >>> print(Moment(2, 1, variant=2))
-    Im H^2(2, +1)
+    Im H^2(2, 1)
+    >>> print(Moment(2, -1))
+    H(2, -1)
     """
 
     L: ld.L
@@ -169,7 +192,7 @@ class Moment:
         Examples
         --------
         >>> print(Moment(1, 1).real)
-        Re H(1, +1)
+        Re H(1, 1)
         """
         return Observable(self, "real" if self.variant is None else None)
 
@@ -185,14 +208,28 @@ class Moment:
         return Observable(self, "imag")
 
     def __str__(self) -> str:
-        """Return scientific observable notation."""
+        """Return scientific notation with numeric rank and projection.
+
+        Returns
+        -------
+        str
+            ``H(L, M)`` for an unpolarized moment, ``H^0(L, M)`` or
+            ``H^1(L, M)`` for polarized variants, or ``Im H^2(L, M)`` for
+            variant 2, which already denotes a real scalar observable.
+        """
         name = "H" if self.variant is None else f"H^{self.variant}"
         if self.variant == 2:
             name = f"Im {name}"
-        return f"{name}({self.L.value}, {int(self.M.value):+})"
+        return f"{name}({self.L.value}, {int(self.M.value)})"
 
     def __repr__(self) -> str:
-        """Return an explicit constructor representation."""
+        """Return a constructor expression preserving the polarized variant.
+
+        Returns
+        -------
+        str
+            An expression such as ``Moment(2, 1, variant=2)``.
+        """
         variant = "" if self.variant is None else f", variant={self.variant}"
         return f"Moment({self.L.value}, {int(self.M.value)}{variant})"
 
@@ -226,7 +263,7 @@ class Observable:
     >>> Moment(1, 1).imag == Observable(Moment(1, 1), 'imag')
     True
     >>> print(Observable(Moment(2, 1, variant=2)))
-    Im H^2(2, +1)
+    Im H^2(2, 1)
     """
 
     moment: Moment
@@ -344,6 +381,12 @@ class Waveset:
     (2, 3)
     >>> pool.waves
     (Wave(0, 0), Wave(1, 0))
+    >>> print(pool)
+    {S0, P0}
+    >>> pool
+    Waveset([(0, 0), (1, 0)])
+    >>> print(Waveset([(2, 2, "+"), (0, 0, "+")]))
+    {S0(+), D+2(+)}
     """
 
     waves: tuple[Wave, ...]
@@ -450,10 +493,31 @@ class Waveset:
                 yield Waveset(members, polarized=self.polarized)
 
     def __str__(self) -> str:
-        """Return a compact list of spectroscopic wave labels."""
+        """Return the canonically ordered basis in spectroscopic notation.
+
+        Returns
+        -------
+        str
+            Brace-enclosed wave labels, such as ``{S0(+), D+2(+)}``.
+            Only basis waves are formatted; no subsets are enumerated.
+        """
         return "{" + ", ".join(str(wave) for wave in self.waves) + "}"
 
     def __repr__(self) -> str:
-        """Describe the basis without expanding its powerset."""
-        mode = ", polarized=True" if self.polarized else ""
-        return f"Waveset({list(self.waves)!r}{mode})"
+        """Return a constructor expression using compact canonical wave tuples.
+
+        Returns
+        -------
+        str
+            A reconstructible expression such as ``Waveset([(0, 0)])``.
+            Empty polarized sets retain ``polarized=True``; nonempty sets
+            infer their mode from the wave tuples. No subsets are enumerated.
+        """
+        definitions = [
+            wave.key[:2]
+            if wave.reflectivity is None
+            else (*wave.key[:2], "+" if wave.reflectivity.value == 1 else "-")
+            for wave in self.waves
+        ]
+        mode = ", polarized=True" if self.polarized and not self.waves else ""
+        return f"Waveset({definitions!r}{mode})"
