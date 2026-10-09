@@ -314,6 +314,35 @@ Minimal sets are certified by proving every admissible immediate subset incompat
 Unresolved smaller subsets prevent certification, and incomplete search may omit
 true minima. Minimality is relative to `size_limits`. See [algorithm notes](docs/algorithms.md).
 
+Supply an `on_check(waves, result)` callback to observe numerical evaluations.
+It receives immutable `Waveset` and `CheckResult` objects after the initial pool
+check, direct checks, search evaluations, and minimal-set certification. Cached
+and inferred decisions do not emit events. Callbacks run on the calling thread,
+including parallel searches, and exceptions propagate after caching the completed
+check. Choose any progress-display library, for example tqdm:
+
+```python
+from tqdm.auto import tqdm
+
+with tqdm(desc="Waveset checks", unit="check") as progress:
+    analysis = mo.analyze(data, pool, on_check=lambda waves, result: progress.update())
+    search = analysis.search(workers=2)
+    minimal = search.minimal_wavesets()
+```
+
+Pruning makes the number of numerical evaluations unknown in advance. This display
+reports completed checks and throughput; using the entire powerset as its total
+would give a misleading fraction and ETA. Inspect `search.complete` for unresolved
+outcomes. Momentous has no progress-display dependency; tqdm is used by the demo.
+
+`workers=1` selects serial search. By default, ordinary Python uses up to two workers and
+Python with the GIL disabled uses up to eight workers. Explicit thread counts work
+on either build, and workers share prepared inputs while owning their solver
+templates. Additional threads can increase overhead; benchmark your workload.
+CVXPY's current `_cvxcore` extension re-enables the GIL when loaded on free-threaded
+Python. Momentous respects that runtime behavior; numerical array operations can
+still run concurrently. laddu and native numerical thread settings are unchanged.
+
 ## Development and examples
 
 ```sh
@@ -327,6 +356,7 @@ uv run pre-commit run --all-files
 uv run python scripts/demo.py --events 20000 --mc-events 50000
 uv run python scripts/demo.py --polarized --max-wave-l 2
 uv run python scripts/benchmark.py --pool-l 2 --mc-events 50000
+uv run python scripts/benchmark.py --polarized --pool-l 2 --workers 1 --workers 2 --time-limit 600
 ```
 
 Focused pytest tests and executable NumPy-style docstrings preserve distinct
@@ -340,3 +370,7 @@ envelope, and generated indices are retained through selection. laddu generation
 and evaluation use `Execution("jit", precision="f64")` without a thread limit. The benchmark
 reuses the measurement and prepared analysis and runs public workflows in processes
 with wall-clock limits. Historical benchmark artifacts describe earlier interfaces.
+The demo displays search progress automatically. The benchmark's repeatable
+`--workers` option compares thread counts against the same extracted measurement.
+See [performance notes](docs/performance.md) for measured runtimes and free-threaded
+Python behavior.

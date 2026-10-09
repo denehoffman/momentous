@@ -1,5 +1,10 @@
 """Prepared candidate evaluation, witness reuse, and monotonic inference."""
 
+from __future__ import annotations
+
+from collections.abc import Callable
+from copy import copy
+from dataclasses import fields
 from itertools import combinations
 
 import numpy as np
@@ -10,6 +15,7 @@ from momentous.geometry import (
     _check_pair,
     _ConicSolver,
     _geometry,
+    _HullBatch,
     _point_hull_witness,
 )
 from momentous.results import (
@@ -35,11 +41,13 @@ class Engine:
         n_sigma: float,
         tolerance: float,
         max_combination_size: int,
+        on_check: Callable[[Waveset, CheckResult], None] | None = None,
     ) -> None:
         """Prepare shared covariance geometry and canonical wave indices."""
         self.pool, self.data = pool, data
         self.n_sigma, self.tolerance = n_sigma, tolerance
         self.max_combination_size = max_combination_size
+        self.on_check = on_check
         self.errors = np.linalg.norm(data.factor, axis=1)
         self.stats = SolverStats()
         self._indices = {wave: index for index, wave in enumerate(pool.waves)}
@@ -59,16 +67,49 @@ class Engine:
             )
             if not redundant:
                 active.append(index)
+        self._active = active
+        groups: dict[int, int] = {}
+        representatives: list[int] = []
+        for index in active:
+            for representative in representatives:
+                if any(
+                    data.values[index] == sign * data.values[representative]
+                    and np.array_equal(
+                        data.operators[index], sign * data.operators[representative]
+                    )
+                    and np.array_equal(
+                        data.factor[index], sign * data.factor[representative]
+                    )
+                    and np.array_equal(
+                        data.covariance[index], sign * data.covariance[representative]
+                    )
+                    for sign in (1, -1)
+                ):
+                    groups[index] = representative
+                    break
+            else:
+                groups[index] = index
+                representatives.append(index)
+        seen: set[tuple[int, int]] = set()
+        indices = []
+        for i, j in combinations(active, 2):
+            key = (min(groups[i], groups[j]), max(groups[i], groups[j]))
+            if key not in seen:
+                seen.add(key)
+                indices.append((i, j))
+        # Keep one repeated-component pair as well: its joint Euclidean tolerance
+        # is stricter than either scalar tolerance, even with exact correlation.
         self.pairs = (
             [
                 _geometry(
                     data.values[[i, j]], data.covariance[np.ix_([i, j], [i, j])], (i, j)
                 )
-                for i, j in combinations(active, 2)
+                for i, j in indices
             ]
             if max_combination_size == 2
             else []
         )
+        self._hulls = _HullBatch(self.pairs)
 
     def mask(self, waves: Waveset) -> int:
         """Validate a candidate's membership and map it to a private bitmask."""
@@ -115,7 +156,23 @@ class Engine:
                     actual = CheckResult(certified.status, actual.diagnostics)
                 self._detailed[mask] = actual
                 self._remember(mask, actual)
+                self._notify(mask, actual)
             return self._detailed[mask]
+        cached = self.lookup(mask)
+        if cached is not None:
+            return cached
+        result = self.evaluate(mask)
+        self._remember(mask, result)
+        self._notify(mask, result)
+        return result
+
+    def _notify(self, mask: int, result: CheckResult) -> None:
+        """Deliver a completed evaluation after updating coordinating caches."""
+        if self.on_check is not None:
+            self.on_check(self.members(mask), result)
+
+    def lookup(self, mask: int) -> CheckResult | None:
+        """Return cached or inferred decisions without starting numerical work."""
         cached = self._cache.get(mask)
         if cached is not None and cached.status is not Status.UNRESOLVED:
             self.stats.cache_hits += 1
@@ -132,9 +189,31 @@ class Engine:
             return result
         if cached is not None:
             return cached
-        result = self.evaluate(mask)
+        return None
+
+    def worker(self) -> Engine:
+        """Share prepared arrays with a worker that owns its mutable solver state."""
+        worker = copy(self)
+        worker.stats = SolverStats()
+        worker._cache, worker._detailed = {}, {}
+        worker._passing, worker._failing = set(), set()
+        worker._solvers = {}
+        worker.on_check = None
+        return worker
+
+    def accept(self, mask: int, result: CheckResult, stats: SolverStats) -> None:
+        """Merge a completed worker evaluation on the coordinating thread."""
+        for field in fields(SolverStats):
+            setattr(
+                self.stats,
+                field.name,
+                getattr(self.stats, field.name) + getattr(stats, field.name),
+            )
+        certified = self.lookup(mask)
+        if result.status is Status.UNRESOLVED and certified is not None:
+            result = certified
         self._remember(mask, result)
-        return result
+        self._notify(mask, result)
 
     def _remember(self, mask: int, result: CheckResult) -> None:
         """Keep only minimal pass and maximal exclusion inference certificates."""
@@ -202,10 +281,26 @@ class Engine:
             for index in failed:
                 records.append(self._diagnostic(operators, (int(index),), np.ones(1)))
         states = np.concatenate((eigenvectors[:, :, 0], eigenvectors[:, :, -1]), axis=0)
-        references = np.einsum("si,aij,sj->sa", states.conj(), operators, states).real
+        references = np.unique(
+            np.einsum("si,aij,sj->sa", states.conj(), operators, states).real,
+            axis=0,
+        )
         unresolved = False
-        for pair in self.pairs:
-            if _point_hull_witness(
+        pairs = self.pairs
+        hulls = self._hulls
+        if diagnostics and self.max_combination_size == 2:
+            pairs = [
+                _geometry(
+                    self.data.values[[i, j]],
+                    self.data.covariance[np.ix_([i, j], [i, j])],
+                    (i, j),
+                )
+                for i, j in combinations(self._active, 2)
+            ]
+            hulls = _HullBatch(pairs)
+        passed = hulls.witnesses(references, self.n_sigma, self.tolerance)
+        for index, pair in enumerate(pairs):
+            if passed[index] or _point_hull_witness(
                 references[:, list(pair.indices)], pair, self.n_sigma, self.tolerance
             ):
                 self.stats.pair_checks += 1

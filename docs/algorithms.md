@@ -11,6 +11,19 @@ Analysis checks the full pool; `analysis.search(min_size=1, max_size=...)` retur
 a separate `SearchResult`. Checks and candidate views remain independent of its
 cardinality domain. The search shares the prepared analysis and certificates.
 
+Pair evaluation batches attainable-hull witnesses with NumPy. Exactly equivalent
+observables can share pair checks only when their operators, measured values,
+covariance rows, and uncertainty-factor rows agree up to a sign. A pair of repeated
+observables remains necessary: its Euclidean tolerance is stricter than either
+individual component's tolerance. Detailed diagnostics still check every labeled
+pair. Exact duplicate reference points are removed without changing their hull.
+
+Parallel search schedules independent candidate evaluations. A single coordinator
+owns monotonic certificates, branch pruning, statistics, and check callbacks;
+each worker owns its mutable numerical solver templates. Unresolved evaluations
+cannot establish certificates. Outstanding work is bounded by the worker count,
+and cancellation stops scheduling further evaluations.
+
 Both modes use raw Wigner-D moments and divide by H00 (H^0(0,0) when polarized).
 For a real scalar component x_i and normalizer d, y_i=x_i/d, so the Jacobian is
 J_ij=delta_ij/d-x_i*delta_jd/d^2. The denominator's

@@ -17,7 +17,7 @@ requires = ["uv_build>=0.12.17,<0.13.0"]
 build-backend = "uv_build"
 
 [dependency-groups]
-dev = ["pre-commit>=4.3", "pytest>=8.3", "ruff==0.16.10", "ty==0.0.85"]
+dev = ["pre-commit>=4.3", "pytest>=8.3", "ruff==0.16.10", "ty==0.0.85", "tqdm>=4.67"]
 
 [tool.ruff]
 target-version = "py312"

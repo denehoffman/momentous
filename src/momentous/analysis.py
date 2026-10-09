@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from numbers import Integral
 from types import MappingProxyType
@@ -293,7 +293,13 @@ class AnalysisResult:
             first, second, n_directions=n_directions
         )
 
-    def search(self, *, min_size: int = 1, max_size: int | None = None) -> SearchResult:
+    def search(
+        self,
+        *,
+        min_size: int = 1,
+        max_size: int | None = None,
+        workers: int | None = None,
+    ) -> SearchResult:
         """Search pool subsets in an explicit inclusive cardinality domain.
 
         Parameters
@@ -302,21 +308,36 @@ class AnalysisResult:
             Smallest searched nonempty waveset.
         max_size : int, optional
             Largest searched waveset, defaulting to pool size.
+        workers : int, optional
+            Number of search threads. One runs serially. The default uses up to two on
+            ordinary Python and up to eight when the GIL is disabled. Each worker
+            owns its numerical solver templates; ``on_check`` callbacks run on the
+            calling thread. Native numerical libraries retain their own settings.
 
         Returns
         -------
         SearchResult
             Compressed passing sets, unresolved candidates, and certified minima.
 
+        Raises
+        ------
+        ValueError
+            If size limits are inadmissible or workers is not positive.
+        TypeError
+            If workers is not an integer.
+
         Notes
         -----
         Worst-case search and output are exponential. Repeated searches reuse
         established candidate certificates while returning separate size domains.
+        Default worker selection checks the runtime GIL state. A native extension
+        such as CVXPY's current ``_cvxcore`` can re-enable the GIL when imported;
+        numerical array operations may still run concurrently.
         """
         minimum, maximum = size_limits(min_size, max_size, len(self.pool))
         if minimum < 1:
             raise ValueError("Search min_size must be at least one")
-        return SearchResult(self, run_search(self._engine, minimum, maximum))
+        return SearchResult(self, run_search(self._engine, minimum, maximum, workers))
 
     def __repr__(self) -> str:
         """Summarize input dimensions without running search or expanding candidates."""
@@ -334,6 +355,7 @@ def analyze(
     max_combination_size: int = 2,
     n_sigma: float = 3.0,
     tolerance: float = 1e-8,
+    on_check: Callable[[Waveset, CheckResult], None] | None = None,
 ) -> AnalysisResult:
     r"""Normalize raw measurements and prepare necessary waveset compatibility checks.
 
@@ -352,6 +374,13 @@ def analyze(
         Covariance radius multiplier, not a joint confidence level or p-value.
     tolerance : float, default 1e-8
         Absolute numerical slack in normalized coordinates, separate from errors.
+    on_check : callable, optional
+        Called as ``on_check(waves, result)`` after each numerical candidate
+        evaluation: the initial pool check, direct checks, search checks, and
+        minimal-set certification. Arguments are immutable ``Waveset`` and
+        ``CheckResult`` objects. Cached or inferred decisions do not emit events.
+        Callbacks run synchronously on the calling thread, including parallel
+        searches. Exceptions propagate after retaining the completed check.
 
     Returns
     -------
@@ -363,7 +392,7 @@ def analyze(
     ValueError
         If pool, polarization, or numerical settings are invalid.
     TypeError
-        If data is not MomentData.
+        If data is not MomentData or on_check is not callable.
     NotImplementedError
         If a combination size larger than two is requested.
 
@@ -422,9 +451,18 @@ def analyze(
 
     Examples
     --------
-    Construct raw data, bind a candidate, and search explicitly:
+    Observe actual evaluations without choosing a progress-display library:
 
     >>> from momentous import Covariance, Moment, NormalizationWarning
+    >>> checks = []
+    >>> data = MomentData({(0, 0): 1, (1, 0): 0}, covariance=Covariance.exact())
+    >>> analysis = analyze(data, Waveset([(0, 0), (1, 0)]),
+    ...     on_check=lambda waves, result: checks.append((waves, result.status)))
+    >>> checks[0][0] == analysis.pool, checks[0][1].value
+    (True, 'compatible')
+
+    Construct raw data, bind a candidate, and search explicitly:
+
     >>> data = MomentData({(0, 0): 10, (1, 1): 0j}, covariance=Covariance.exact())
     >>> analysis = analyze(data, Waveset([(0, 0), (1, 1)]))
     >>> candidate = analysis.for_waves(Waveset([(0, 0), (1, 1)]))
@@ -467,6 +505,8 @@ def analyze(
     'compatible'
     """
     _settings(n_sigma, tolerance)
+    if on_check is not None and not callable(on_check):
+        raise TypeError("on_check must be callable or None")
     if not isinstance(max_combination_size, Integral) or isinstance(
         max_combination_size, bool
     ):
@@ -476,6 +516,8 @@ def analyze(
     if max_combination_size < 1:
         raise ValueError("max_combination_size must be one or two")
     prepared = prepare_data(data, waves)
-    engine = Engine(waves, prepared, n_sigma, tolerance, int(max_combination_size))
+    engine = Engine(
+        waves, prepared, n_sigma, tolerance, int(max_combination_size), on_check
+    )
     engine.check((1 << len(waves)) - 1)
     return AnalysisResult(engine, data)

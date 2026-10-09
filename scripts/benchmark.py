@@ -26,6 +26,7 @@ def benchmark_case(
     n_sigma: float,
     full_only: bool,
     baseline_limit: int,
+    workers: int | None = None,
 ) -> None:
     """Measure public analyses and send compact results to the parent process."""
     try:
@@ -42,6 +43,7 @@ def benchmark_case(
             "full_status": prepared.check().status.value,
             "search_complete": False,
             "passing": None,
+            "workers": workers if workers is not None else "auto",
         }
         output.send(row.copy())
         if full_only:
@@ -49,7 +51,7 @@ def benchmark_case(
             row.update(asdict(prepared.stats))
         else:
             start = perf_counter()
-            result = prepared.search(max_size=maximum)
+            result = prepared.search(max_size=maximum, workers=workers)
             row.update(
                 search_seconds=perf_counter() - start,
                 search_complete=result.complete,
@@ -95,6 +97,7 @@ def run_case(
     full_only: bool,
     baseline_limit: int,
     time_limit: float,
+    workers: int | None = None,
 ) -> dict[str, object]:
     """Run one case with a hard wall-clock limit and retain completed stages."""
     context = mp.get_context("spawn")
@@ -109,6 +112,7 @@ def run_case(
             n_sigma,
             full_only,
             baseline_limit,
+            workers,
         ),
     )
     start = perf_counter()
@@ -145,6 +149,12 @@ def main() -> None:
     parser.add_argument("--mc-events", type=int, default=MC_EVENTS)
     parser.add_argument("--n-sigma", type=float, default=3)
     parser.add_argument(
+        "--workers",
+        type=int,
+        action="append",
+        help="search thread counts to compare; repeat (default: automatic)",
+    )
+    parser.add_argument(
         "--pool-l", type=int, action="append", help="pool ranks to benchmark; repeat"
     )
     parser.add_argument(
@@ -167,6 +177,9 @@ def main() -> None:
     )
     args = parser.parse_args()
     levels = args.pool_l or [2, 3]
+    worker_counts = args.workers or [None]
+    if any(count is not None and count < 1 for count in worker_counts):
+        parser.error("workers must be positive")
     if any(level < 0 for level in levels) or args.baseline_limit < 0:
         parser.error("pool-l and baseline-limit must be nonnegative")
     if not isfinite(args.time_limit) or args.time_limit <= 0:
@@ -191,7 +204,9 @@ def main() -> None:
     print(extraction.diagnostics)
     print(extraction.covariance_scope)
     rows = []
-    for level in levels:
+    for level, workers in (
+        (level, workers) for level in levels for workers in worker_counts
+    ):
         pool = Waveset.from_max_l(
             level, reflectivities=("+", "-") if args.polarized else None
         )
@@ -205,6 +220,7 @@ def main() -> None:
             args.full_only,
             args.baseline_limit,
             args.time_limit,
+            workers,
         )
         row["pool_l"] = level
         if "error" in row:

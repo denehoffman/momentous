@@ -12,13 +12,40 @@ from momentous import (
     Waveset,
     analyze,
 )
-from momentous.geometry import _ConicSolver, check_pair, region_data
+from momentous.geometry import (
+    _ConicSolver,
+    _geometry,
+    _HullBatch,
+    _point_hull_witness,
+    check_pair,
+    region_data,
+)
 from momentous.results import ComplexArray
 
 
 @pytest.fixture
 def disk_operators() -> tuple[ComplexArray, ComplexArray]:
     return np.array([[0, 1], [1, 0]], dtype=complex), np.array([[0, -1j], [1j, 0]])
+
+
+def test_batched_hull_witnesses_preserve_tangency_and_exact_constraints() -> None:
+    references = np.array([[-1.0, -1.0], [-1, 1], [1, -1], [1, 1]])
+    pairs = [
+        _geometry(np.array(point), np.array(covariance))
+        for point, covariance in [
+            ([0, 0], [[0, 0], [0, 0]]),
+            ([2, 0], [[1, 0], [0, 1]]),
+            ([2.01, 0], [[1, 0], [0, 1]]),
+            ([1.01, 0], [[0, 0], [0, 1]]),
+            ([1.01, 0], [[1e-40, 0], [0, 1]]),
+        ]
+    ]
+    witnesses = _HullBatch(pairs).witnesses(references, 1, 1e-8)
+    verdicts = [
+        bool(passed) or _point_hull_witness(references, pair, 1, 1e-8)
+        for passed, pair in zip(witnesses, pairs, strict=True)
+    ]
+    assert verdicts == [True, True, False, False, False]
 
 
 @pytest.mark.parametrize(

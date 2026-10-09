@@ -9,6 +9,7 @@ import argparse
 
 import laddu as ld
 import numpy as np
+from tqdm.auto import tqdm
 
 import momentous as mo
 
@@ -251,11 +252,19 @@ def main() -> None:
         f"Searching all subsets of {len(pool)} waves with moments through L={2 * args.max_wave_l}...",
         flush=True,
     )
-    result = mo.analyze(extraction.data, pool, n_sigma=args.n_sigma).search()
+    with tqdm(desc="Waveset checks", unit="check") as progress:
+        analysis = mo.analyze(
+            extraction.data,
+            pool,
+            n_sigma=args.n_sigma,
+            on_check=lambda waves, result: progress.update(),
+        )
+        result = analysis.search()
+        minimal = result.minimal_wavesets()
     print(
         f"Passing: {result.count:,}/{result.candidate_count:,}; unresolved: {len(result.unresolved)}"
     )
-    print("Certified minimal sets:", result.minimal_wavesets())
+    print("Certified minimal sets:", minimal)
     print(result.stats)
 
 

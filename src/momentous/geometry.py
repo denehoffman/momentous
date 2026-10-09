@@ -35,6 +35,76 @@ class _Pair:
     whitener: RealArray | None
 
 
+class _HullBatch:
+    """Batch conservative attainable-hull witnesses for fixed pair geometries.
+
+    Notes
+    -----
+    False entries require the individual witness or solver. Singular ellipses
+    retain their exact constraints in that fallback; no small variance is dropped.
+    """
+
+    def __init__(self, pairs: Sequence[_Pair]) -> None:
+        """Collect pair indices, measured points, and covariance transformations."""
+        self.indices = np.asarray([pair.indices for pair in pairs], dtype=int).reshape(
+            -1, 2
+        )
+        self.points = np.asarray([pair.point for pair in pairs]).reshape(-1, 2)
+        self.full_rank = np.asarray(
+            [pair.whitener is not None for pair in pairs], dtype=bool
+        )
+        self.whiteners = np.asarray(
+            [np.eye(2) if pair.whitener is None else pair.whitener for pair in pairs]
+        ).reshape(-1, 2, 2)
+
+    def witnesses(
+        self, references: RealArray, tau: float, tolerance: float
+    ) -> np.ndarray:
+        """Certify passes together, leaving tangent and singular cases to fallback."""
+        if not len(self.indices):
+            return np.zeros(0, dtype=bool)
+        delta = references[:, self.indices].transpose(1, 0, 2) - self.points[:, None]
+        passed = np.any(np.linalg.norm(delta, axis=2) <= tolerance, axis=1)
+        remaining = np.flatnonzero(~passed)
+        if not len(remaining):
+            return passed
+        coordinates = np.einsum(
+            "pij,psj->psi", self.whiteners[remaining], delta[remaining]
+        )
+        angles = np.arctan2(coordinates[:, :, 1], coordinates[:, :, 0])
+        order = np.argsort(angles, axis=1)
+        angles = np.take_along_axis(angles, order, axis=1)
+        gaps = np.diff(
+            np.concatenate((angles, angles[:, :1] + 2 * np.pi), axis=1), axis=1
+        )
+        contained = np.max(gaps, axis=1) < np.pi - 1e-12
+        passed[remaining[contained]] = True
+        # Only positive definite ellipses admit this whitened distance witness.
+        pending = np.flatnonzero(~contained & self.full_rank[remaining])
+        if not len(pending):
+            return passed
+        coordinates = np.take_along_axis(
+            coordinates[pending], order[pending, :, None], axis=1
+        )
+        edges = np.roll(coordinates, -1, axis=1) - coordinates
+        lengths = np.einsum("psi,psi->ps", edges, edges)
+        fractions = np.clip(
+            np.divide(
+                -np.einsum("psi,psi->ps", coordinates, edges),
+                lengths,
+                out=np.zeros_like(lengths),
+                where=lengths > 0,
+            ),
+            0,
+            1,
+        )
+        distances = np.linalg.norm(coordinates + fractions[:, :, None] * edges, axis=2)
+        passed[remaining[pending]] = (
+            np.min(distances, axis=1) < tau - 256 * np.finfo(float).eps
+        )
+        return passed
+
+
 def _geometry(
     point: RealArray, covariance: RealArray, indices: tuple[int, int] = (0, 1)
 ) -> _Pair:

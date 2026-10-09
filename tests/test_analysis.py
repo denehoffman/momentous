@@ -84,6 +84,20 @@ def test_polarized_cross_variant_checks_use_singular_joint_covariance() -> None:
     )
 
 
+def test_duplicate_observables_still_apply_the_joint_euclidean_tolerance() -> None:
+    pool = Waveset([(0, 0, "+"), (1, 0, "+")])
+    tolerance = 1e-7
+    value = 1 / np.sqrt(3) + 0.9 * tolerance
+    data = MomentData(
+        {(0, 0, 0): 1, (1, 0, 0): value, (1, 0, 1): value},
+        covariance=Covariance.exact(),
+    )
+    assert (
+        analyze(data, pool, max_combination_size=1, tolerance=tolerance).check().valid
+    )
+    assert not analyze(data, pool, tolerance=tolerance).check().valid
+
+
 def test_full_diagnostics_collect_pairs_after_individual_failures() -> None:
     result = analyze(
         MomentData(
@@ -112,7 +126,10 @@ def test_diagnostics_recompute_bounds_for_an_inferred_candidate() -> None:
     assert larger.bounds != failure.bounds
 
 
-def test_search_matches_fresh_candidate_checks_and_certifies_minimal_sets() -> None:
+@pytest.mark.parametrize("workers", [1, 3])
+def test_search_matches_fresh_candidate_checks_and_certifies_minimal_sets(
+    workers: int,
+) -> None:
     pool = Waveset([(0, 0), (1, 0), (1, 1), (2, 0)])
     moments = {(0, 0): 1, (1, 0): 1 / np.sqrt(3), (2, 0): 0.2}
     expected = {
@@ -126,9 +143,10 @@ def test_search_matches_fresh_candidate_checks_and_certifies_minimal_sets() -> N
     }
     result = analyze(
         MomentData(moments, covariance=Covariance.exact()), pool, n_sigma=0
-    ).search()
+    ).search(workers=workers)
     passing = list(result.wavesets())
     assert result.complete and set(passing) == expected
+    assert passing == [candidate for candidate in pool if candidate in expected]
     assert len(passing) == len(set(passing)) == result.count
     expected_minimal = {
         candidate
@@ -156,8 +174,10 @@ def test_minimality_is_relative_to_the_search_size_domain() -> None:
     assert result.analysis.check(Waveset([(0, 0)])).valid
 
 
+@pytest.mark.parametrize("workers", [1, 3])
 def test_unresolved_decisions_do_not_prune_search(
     monkeypatch: pytest.MonkeyPatch,
+    workers: int,
 ) -> None:
     monkeypatch.setattr(
         Engine, "evaluate", Mock(return_value=CheckResult(Status.UNRESOLVED))
@@ -165,14 +185,16 @@ def test_unresolved_decisions_do_not_prune_search(
     result = analyze(
         MomentData({(0, 0): 1, (1, 0): 0}, covariance=Covariance.exact()),
         Waveset([(0, 0), (1, 0), (2, 0)]),
-    ).search()
+    ).search(workers=workers)
     assert not result.complete
     assert len(result.unresolved) == 7 and result.count == 0
     assert result.minimal_wavesets() == ()
 
 
+@pytest.mark.parametrize("workers", [1, 3])
 def test_unresolved_smaller_candidate_prevents_minimal_certification(
     monkeypatch: pytest.MonkeyPatch,
+    workers: int,
 ) -> None:
     def verdict(self: Engine, mask: int, *, diagnostics: bool = False) -> CheckResult:
         return CheckResult(
@@ -188,13 +210,15 @@ def test_unresolved_smaller_candidate_prevents_minimal_certification(
     pool = Waveset([(0, 0), (1, 0)])
     result = analyze(
         MomentData({(0, 0): 1, (1, 0): 0}, covariance=Covariance.exact()), pool
-    ).search()
+    ).search(workers=workers)
     assert result.status(pool) is Status.COMPATIBLE
     assert not result.complete and result.minimal_wavesets() == ()
 
 
+@pytest.mark.parametrize("workers", [1, 3])
 def test_later_pass_certificate_resolves_an_earlier_unknown_superset(
     monkeypatch: pytest.MonkeyPatch,
+    workers: int,
 ) -> None:
     def verdict(self: Engine, mask: int, *, diagnostics: bool = False) -> CheckResult:
         return CheckResult(Status.COMPATIBLE if mask == 2 else Status.UNRESOLVED)
@@ -203,7 +227,7 @@ def test_later_pass_certificate_resolves_an_earlier_unknown_superset(
     pool = Waveset([(0, 0), (1, 0)])
     result = analyze(
         MomentData({(0, 0): 1, (1, 0): 0}, covariance=Covariance.exact()), pool
-    ).search()
+    ).search(workers=workers)
     assert result.status(pool) is Status.COMPATIBLE
     assert result.count == 2
     assert result.unresolved == (Waveset([(0, 0)]),)
@@ -223,6 +247,32 @@ def test_one_prepared_analysis_can_search_multiple_size_domains() -> None:
     with pytest.raises(ValueError, match="size domain"):
         second.status(result.pool)
     assert result.status(result.pool) is Status.COMPATIBLE
+
+
+def test_parallel_solver_checks_preserve_correlated_pair_verdicts() -> None:
+    pool = Waveset.from_max_l(1)
+    labels = [(0, 0, "real"), (0, 0, "imag"), (1, 1, "real"), (1, 1, "imag")]
+    covariance = Covariance(np.pad([[0.01, -0.009], [-0.009, 0.01]], (2, 0)), labels)
+    data = MomentData({(0, 0): 1, (1, 1): 0.25 + 0.25j}, covariance=covariance)
+    serial = analyze(data, pool, n_sigma=1).search(workers=1)
+    analysis = analyze(data, pool, n_sigma=1)
+    parallel = analysis.search(workers=3)
+    assert serial.complete == parallel.complete
+    assert [serial.status(candidate) for candidate in pool] == [
+        parallel.status(candidate) for candidate in pool
+    ]
+    assert set(serial.minimal_wavesets()) == set(parallel.minimal_wavesets())
+    assert analysis.search(workers=3).count == parallel.count
+
+
+@pytest.mark.parametrize("workers", [0, -1, True, 1.5])
+def test_search_workers_require_a_positive_integer(workers: int) -> None:
+    analysis = analyze(
+        MomentData({(0, 0): 1, (1, 0): 0}, covariance=Covariance.exact()),
+        Waveset([(0, 0)]),
+    )
+    with pytest.raises((ValueError, TypeError), match="workers"):
+        analysis.search(workers=workers)
 
 
 def test_candidate_metric_is_restricted_before_normalization(

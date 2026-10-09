@@ -2,15 +2,21 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+import os
+import sys
+from collections.abc import Callable, Iterator
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
+from heapq import merge
 from itertools import combinations
 from math import comb
+from numbers import Integral
+from threading import local
 from typing import TYPE_CHECKING
 
 from momentous._engine import Engine
 from momentous.domain import Waveset
-from momentous.results import SolverStats, Status
+from momentous.results import CheckResult, SolverStats, Status
 
 if TYPE_CHECKING:
     from momentous.analysis import AnalysisResult
@@ -64,7 +70,9 @@ class Search:
 
     def passing(self, *, smallest_only: bool = False) -> Iterator[int]:
         """Expand blocks lazily, optionally yielding only their smallest members."""
-        for block in self.blocks:
+
+        def expand(block: Block) -> Iterator[int]:
+            """Yield one block in cardinality and canonical-wave order."""
             required = block.required.bit_count()
             free = block.allowed & ~block.required
             bits = [1 << i for i in range(free.bit_length()) if free & (1 << i)]
@@ -75,6 +83,14 @@ class Search:
             for size in range(lower, upper + 1):
                 for extra in combinations(bits, size - required):
                     yield block.required | sum(extra)
+
+        def order(mask: int) -> tuple[int, tuple[int, ...]]:
+            """Order candidates independently of parallel branch completion."""
+            return mask.bit_count(), tuple(
+                i for i in range(mask.bit_length()) if mask & (1 << i)
+            )
+
+        yield from merge(*(expand(block) for block in self.blocks), key=order)
 
     def minimal(self, engine: Engine) -> tuple[int, ...]:
         """Certify minimal passes by excluding every admissible immediate subset."""
@@ -233,33 +249,143 @@ class SearchResult:
         return repr(self)
 
 
-def search(engine: Engine, minimum: int, maximum: int) -> Search:
-    """Visit exclusion-first branches, pruning only established decisions."""
-    stack = [(0, (1 << len(engine.pool)) - 1)]
-    blocks: list[Block] = []
-    unresolved: set[int] = set()
-    while stack:
-        required, allowed = stack.pop()
-        if required.bit_count() > maximum or allowed.bit_count() < minimum:
-            continue
-        if required and engine.check(required).status is Status.COMPATIBLE:
-            blocks.append(Block(required, allowed))
-            continue
-        if engine.check(allowed).status is Status.INCOMPATIBLE:
-            continue
-        if required == allowed:
-            unresolved.add(required)
-            continue
-        undecided = allowed & ~required
-        bit = undecided & -undecided
-        stack.append((required | bit, allowed))
-        stack.append((required, allowed ^ bit))
-    # Later certificates can resolve earlier leaves across different branches.
-    remaining = set()
-    for mask in unresolved:
-        status = engine.check(mask).status
-        if status is Status.COMPATIBLE:
-            blocks.append(Block(mask, mask))
-        elif status is Status.UNRESOLVED:
-            remaining.add(mask)
-    return Search(tuple(blocks), frozenset(remaining), minimum, maximum)
+class _Traversal:
+    """Coordinate disjoint search branches and monotonic certificates."""
+
+    def __init__(
+        self,
+        engine: Engine,
+        minimum: int,
+        maximum: int,
+    ) -> None:
+        """Initialize an exclusion-first traversal over the selected size domain."""
+        self.engine, self.minimum, self.maximum = engine, minimum, maximum
+        self.stack = [Block(0, (1 << len(engine.pool)) - 1)]
+        self.blocks: list[Block] = []
+        self.unresolved: set[int] = set()
+
+    def advance(
+        self, branch: Block, check: Callable[[int], CheckResult | None]
+    ) -> int | None:
+        """Resolve or split a branch, returning an uncached mask when work is needed."""
+        required, allowed = branch.required, branch.allowed
+        if required.bit_count() > self.maximum or allowed.bit_count() < self.minimum:
+            return None
+        if required:
+            result = check(required)
+            if result is None:
+                return required
+            if result.status is Status.COMPATIBLE:
+                self.blocks.append(branch)
+                return None
+        result = check(allowed)
+        if result is None:
+            return allowed
+        if result.status is Status.INCOMPATIBLE:
+            return None
+        elif required == allowed:
+            self.unresolved.add(required)
+        else:
+            undecided = allowed & ~required
+            bit = undecided & -undecided
+            self.stack.append(Block(required | bit, allowed))
+            self.stack.append(Block(required, allowed ^ bit))
+        return None
+
+    def finish(self) -> Search:
+        """Apply later certificates to unresolved leaves and freeze the search."""
+        remaining = set()
+        for mask in sorted(self.unresolved):
+            status = self.engine.check(mask).status
+            if status is Status.COMPATIBLE:
+                self.blocks.append(Block(mask, mask))
+            elif status is Status.UNRESOLVED:
+                remaining.add(mask)
+        return Search(
+            tuple(self.blocks), frozenset(remaining), self.minimum, self.maximum
+        )
+
+
+@dataclass(frozen=True)
+class _Evaluation:
+    """A completed worker evaluation and its private work counters."""
+
+    mask: int
+    result: CheckResult
+    stats: SolverStats
+
+
+class _Workers:
+    """Keep solver templates private to each search thread."""
+
+    def __init__(self, engine: Engine) -> None:
+        """Share immutable preparation while allocating thread-local evaluators."""
+        self.engine = engine
+        self.local = local()
+
+    def evaluate(self, mask: int) -> _Evaluation:
+        """Evaluate without reading or writing coordinating search certificates."""
+        if not hasattr(self.local, "engine"):
+            self.local.engine = self.engine.worker()
+        engine = self.local.engine
+        engine.stats = SolverStats()
+        result = engine.evaluate(mask)
+        return _Evaluation(mask, result, engine.stats)
+
+
+def _parallel(traversal: _Traversal, workers: int) -> None:
+    """Schedule bounded independent evaluations and merge them on the caller."""
+    evaluators = _Workers(traversal.engine)
+    pending: dict[Future[_Evaluation], list[Block]] = {}
+    masks: dict[int, Future[_Evaluation]] = {}
+    executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="momentous")
+    try:
+        while traversal.stack or pending:
+            while traversal.stack and len(pending) < workers:
+                branch = traversal.stack.pop()
+                mask = traversal.advance(branch, traversal.engine.lookup)
+                if mask is None:
+                    continue
+                future = masks.get(mask)
+                if future is None:
+                    future = executor.submit(evaluators.evaluate, mask)
+                    masks[mask] = future
+                    pending[future] = []
+                pending[future].append(branch)
+            if pending:
+                finished, _ = wait(pending, return_when=FIRST_COMPLETED)
+                # Merge simultaneous completions in a stable mask order.
+                for future in sorted(finished, key=lambda f: f.result().mask):
+                    evaluation = future.result()
+                    traversal.engine.accept(
+                        evaluation.mask, evaluation.result, evaluation.stats
+                    )
+                    del masks[evaluation.mask]
+                    traversal.stack.extend(pending.pop(future))
+    finally:
+        for future in pending:
+            future.cancel()
+        executor.shutdown(wait=True, cancel_futures=True)
+
+
+def search(
+    engine: Engine,
+    minimum: int,
+    maximum: int,
+    workers: int | None = None,
+) -> Search:
+    """Prune monotonic branches with serial or private-thread candidate checks."""
+    if workers is None:
+        gil_enabled = getattr(sys, "_is_gil_enabled", lambda: True)()
+        workers = min(2 if gil_enabled else 8, os.cpu_count() or 1)
+    if isinstance(workers, bool) or not isinstance(workers, Integral):
+        raise TypeError("workers must be a positive integer or None")
+    if workers < 1:
+        raise ValueError("workers must be positive")
+    traversal = _Traversal(engine, minimum, maximum)
+    if workers == 1:
+        while traversal.stack:
+            traversal.advance(traversal.stack.pop(), engine.check)
+    else:
+        _parallel(traversal, int(workers))
+    return traversal.finish()
