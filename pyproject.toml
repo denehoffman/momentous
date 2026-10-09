@@ -1,22 +1,42 @@
 [project]
-name = "moments"
+name = "momentous"
 version = "0.1.0"
-description = "Add your description here"
+description = "Covariance-aware angular-moment bounds and partial-wave compatibility"
 readme = "README.md"
 authors = [{ name = "Dene Hoffman", email = "nhoffman@wm.edu" }]
-requires-python = ">=3.14"
+requires-python = ">=3.12"
 dependencies = [
-    "laddu>=0.25.0",
-    "matplotlib>=3.11.2",
+    "cvxpy>=1.7,<1.9",
+    "laddu>=0.26.0",
     "numpy>=2.5.3",
-    "plotly>=7.1.0",
     "scipy>=1.18.1",
 ]
 
 [build-system]
-requires = ["uv_build>=0.11.21,<0.12.0"]
+requires = ["uv_build>=0.12.17,<0.13.0"]
 build-backend = "uv_build"
 
+[dependency-groups]
+dev = ["pre-commit>=4.3", "pytest>=8.3", "ruff==0.16.10", "ty==0.0.85"]
+
+[tool.ruff]
+target-version = "py312"
+
 [tool.ruff.lint]
-extend-select = ["ANN"]
-ignore = ["N803"]
+select = ["E4", "E7", "E9", "F", "I", "ANN", "B", "UP", "D"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["D"]
+
+[tool.pytest.ini_options]
+addopts = "-ra --import-mode=importlib --doctest-modules"
+testpaths = ["tests", "src/momentous"]
+
+[tool.ty.environment]
+python-version = "3.12"
+
+[tool.ty.src]
+include = ["src", "tests", "scripts"]

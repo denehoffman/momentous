@@ -1,0 +1,2 @@
+blocks,cache_hits,candidates,checks,full_check_seconds,full_status,hull_passes,inferred_checks,midpoint_exclusions,pair_checks,passing,pool_l,prepare_seconds,scalar_exclusions,search_complete,search_seconds,solver_calls,solver_seconds,total_seconds,unresolved,waves,wedge_passes
+1,367,987,204,0.14259193098405376,compatible,36595,170,25,36718,1,2,0.05112012999597937,90,True,2.94102445297176,98,0.42216314777033404,3.1347365139517933,0,18,0
