@@ -8,6 +8,13 @@
 * Support paired truth intensity and reconstructed test coordinates, including nonsymmetric responses and truth-coordinate importance density. The reconstructed diagonal option is an approximation that requires closure validation and does not correct general angular or mass-bin migration.
 * Propagate signed hypotheses through physical-event numerator influences and retain independent generated exposure uncertainty and linked fixed-size covariance. Record policies, signed accepted counts/sums, event counts, exposure, and conditioning in serializable diagnostics.
 
+## [0.1.1](https://github.com/denehoffman/momentous/compare/v0.1.0...v0.1.1) (2026-10-10)
+
+
+### Features
+
+* **extraction:** Support grouped signed MC and explicit response models ([b638d99](https://github.com/denehoffman/momentous/commit/b638d99beae1c639c54d07b68c8a747e8cc4df81))
+
 ## 0.1.0 (2026-10-09)
 
 
