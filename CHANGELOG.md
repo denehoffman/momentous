@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Features
+
+* Add explicit `ResponseModel` coordinates for grouped accepted MC, preserving the same-truth-coordinate default. Signed accepted estimator weights work automatically; generated exposure remains nonnegative.
+* Support paired truth intensity and reconstructed test coordinates, including nonsymmetric responses and truth-coordinate importance density. The reconstructed diagonal option is an approximation that requires closure validation and does not correct general angular or mass-bin migration.
+* Propagate signed hypotheses through physical-event numerator influences and retain independent generated exposure uncertainty and linked fixed-size covariance. Record policies, signed accepted counts/sums, event counts, exposure, and conditioning in serializable diagnostics.
+
 ## 0.1.0 (2026-10-09)
 
 

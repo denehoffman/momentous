@@ -312,10 +312,11 @@ class EventSample:
     -----
     Construction snapshots all numerical columns. Both data and accepted MC may
     contain multiple weighted hypotheses. Weights are never rescaled per event.
-    Data may have negative subtraction weights; MC weights must be nonnegative.
+    Data and accepted MC may have negative subtraction weights automatically.
+    Generated exposure remains nonnegative.
     The statistical model conditions on the supplied weights and calibration.
-    All samples must use the same analysis frame. Accepted MC angles must be
-    truth angles: this API corrects acceptance, not reconstruction migration.
+    All samples must use the same analysis frame. Acceptance declares whether
+    accepted coordinates are truth, paired reconstruction, or an approximation.
     """
 
     costheta: RealArray

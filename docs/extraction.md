@@ -100,8 +100,9 @@ physical event per row and no ID columns, explicitly use
 `Acceptance(generated, accepted, ...)` defaults to `MCStatistics.linked()` and
 `MCIntegration.uniform()`. Every accepted event ID must have a generated
 counterpart; repeats and reordered accepted rows are supported. All hypotheses
-of an MC event must share truth angles and beam information. Linking checks that
-accepted truth coordinates match generated coordinates; it never substitutes them.
+of an MC event must share declared truth angles and beam information under the
+default response model. Linking checks that declared accepted truth coordinates
+match generated coordinates; it never substitutes them.
 Both samples must explicitly supply polarization for a polarized workflow.
 Generated MC must represent the experimental beam exposure. These checks do not
 establish that its exposure distribution matches the data.
@@ -124,6 +125,85 @@ For an unpolarized workflow, omit polarization in all samples, use
 `MomentBasis(4)`, and construct `Waveset.from_max_l(2)`.
 An exhaustive two-sector l=2 pool has 262143 nonempty subsets; a search size limit
 such as `.search(max_size=3)` narrows the domain when appropriate.
+
+## Declaring response coordinates and signed accepted weights
+
+Accepted estimator weights automatically retain their signs; no weight-policy
+argument is needed. Coordinate modeling and MC statistics remain separate
+choices, defaulting to `ResponseModel.truth()` and `MCStatistics.linked()`.
+
+For accepted inputs containing reconstructed hypotheses with signed accidental
+subtraction, explicitly declare the coordinate approximation and MC statistics:
+
+```python
+acceptance = mo.Acceptance(
+    generated,
+    accepted,
+    basis=mo.MomentBasis(4, polarized=True),
+    response_model=mo.ResponseModel.reconstructed_diagonal(),
+    statistics=mo.MCStatistics.independent(),
+)
+result = acceptance.extract(data)
+```
+
+`reconstructed_diagonal()` uses each supplied reconstructed row for **both** the
+observed test feature and the intensity feature. Reconstructed hypotheses in the
+same event may have different angles and beam polarization. This approximation
+assumes away the distinction between truth and reconstructed intensity
+coordinates. It does **not** correct general angular or mass-bin migration and
+requires closure validation before scientific interpretation. Uniform generation
+is still an explicit assumption; importance density in this approximation is
+evaluated on the reconstructed intensity coordinates.
+
+For a general angular response, carry truth coordinates on each accepted row:
+
+```python
+truth = mo.EventSample(
+    accepted_columns,
+    costheta="truth_costheta",
+    phi="truth_phi",
+    events=("run_number", "physical_event_number"),
+    polarization=mo.Polarization(magnitude="truth_P", angle="truth_Phi"),
+)
+acceptance = mo.Acceptance(
+    generated,
+    accepted,
+    basis=mo.MomentBasis(4, polarized=True),
+    response_model=mo.ResponseModel.truth_to_reconstruction(truth=truth),
+    statistics=mo.MCStatistics.independent(),
+)
+```
+
+`truth` and `accepted` must have identical physical IDs in identical row order;
+they are a caller-declared row pairing, not an inferred join. Truth coordinates
+must agree within each physical event, while reconstructed coordinates may
+differ. The truth sample supplies only intensity coordinates: its weights are
+ignored. Accepted estimator weights always come from `accepted`. Importance
+density is evaluated on declared truth, including truth polarization. Separate
+generated MC supplies exposure and need not share an ID namespace. Carrying truth
+on accepted MC does not imply statistical linkage to generated MC. This angular
+model alone does not unfold migration between mass bins.
+
+Signed accepted contributions are supported automatically. Generated weights
+remain nonnegative and total generated exposure must be positive and finite.
+Accidental subtraction must estimate the desired selected signal response, in
+units compatible with generated exposure. Weight fits and calibration nuisance
+parameters are conditioned upon; their uncertainty is not included. An invertible
+signed estimate need not be a physically exact detector response.
+
+Preserve the physical grouping `(run_number, physical_event_number)` and exact
+integer IDs, including UInt64 values above 2**63. Ordinals independently assigned
+in separate samples do not establish a shared statistical namespace. Never clip
+negative weights, replace them by absolute values, renormalize each event to one,
+or resample hypotheses independently. Signed contributions are summed within an
+event before taking outer products. A zero sum of weights cancels an event only
+when its feature/matrix contributions also cancel.
+
+Linked statistics still require genuine common event IDs and retain their
+fixed-size correction. Under `truth()` and `truth_to_reconstruction()`, declared
+truth must also match generated truth. The reconstructed diagonal approximation
+checks common IDs but has no accepted truth declaration to compare; selecting
+`linked()` remains an assertion of a genuinely shared source sample.
 
 ## Using other data sources
 
@@ -242,12 +322,14 @@ coordinates are perfectly correlated and exact zeros have zero covariance.
 Let q be the MC generation density relative to the reference measure and v=1/q.
 `MCIntegration.uniform()` explicitly declares q=1. For a known nonuniform q,
 `MCIntegration.importance(relative_density=...)` evaluates a positive real laddu
-expression using `costheta`, `phi`, and polarized `P`, `Phi` on both MC samples.
+expression using `costheta`, `phi`, and polarized `P`, `Phi` on generated truth
+and accepted intensity coordinates in the declared response model.
 The overall normalization of q cancels. Do not also put 1/q in the sample weights.
 
 Supplied generated weights represent exposure; accepted weights represent the
-compatible exposure and selection/hypothesis weighting. MC weights must be
-nonnegative, with positive generated exposure. They must recover the stated
+compatible exposure and selection/hypothesis weighting. Generated weights must
+be nonnegative, with positive generated exposure. Accepted estimator weights may
+be signed without an opt-in. They must recover the stated
 reference measure after the inverse-density correction. Arbitrary physics
 reweighting can change that measure and must not be mislabeled as uniform MC.
 
@@ -262,26 +344,31 @@ For each accepted physical event e, form
 
 \[
 u_e=\sum_{h\in e,\,\mathrm{accepted}}
-w_hv_h f(x_h)c(x_h)^\mathsf T,
+w_hv_h f(x_h^{\mathrm{reco}})c(x_h^{\mathrm{intensity}})^\mathsf T,
 \qquad U=\sum_e u_e,
 \qquad \widehat R=\frac{U}{Z}.
 \]
 
 For an ordinary accepted subset, u_e is zero for rejected generated events.
-All hypotheses of a physical MC event must share its truth coordinates.
+All explicitly declared truth hypotheses in an event must share coordinates.
+Reconstructed test hypotheses may differ under an explicit response model.
 Multiple accepted hypotheses contribute their supplied weights without rescaling.
 For example, weights 0.2 and 0.3 produce a total event weight of 0.5, not one.
 An event weight can exceed one: this is then a weighted selection response,
 not a literal acceptance probability. The analysis weighting must be represented
 consistently in accepted MC.
 
-Under this finite expansion, the response estimates
+Under the default same-truth-coordinate finite expansion, the response estimates
 
 \[
 R=\int \epsilon(x)f(x)c(x)^\mathsf T\,d\mu(x),
 \]
 
-where epsilon includes the effective selection weighting. Accepted MC is divided
+where epsilon includes the effective selection weighting. With paired truth and
+reconstruction, replace this diagonal expression by the response kernel integral
+of reconstructed test features times truth intensity features. It need not be
+symmetric or positive semidefinite; rank checks use SVD and extraction uses a
+general linear solve. Accepted MC is divided
 by **generated** exposure. Dividing by accepted exposure would remove efficiency
 and bias the corrected yield. Data contributions and the estimator are
 
@@ -360,7 +447,8 @@ as exact.
 ### Linked fixed-size generated sample
 
 `MCStatistics.linked()` requires a common physical-event ID namespace in both MC
-samples, matching truth coordinates, and at least two generated physical events.
+samples and at least two generated physical events. Any declared accepted truth
+coordinates must match generated truth.
 Rejected events have u_e=0. For a fixed number N_g of independent generated
 physical events, define
 
@@ -412,7 +500,15 @@ not an exact finite-sample distribution or a correction for finite-MC estimator 
 
 The response must have full rank. Its smallest singular value must exceed 1e-10
 times its largest. `ExtractionError.diagnostics` exposes the singular values,
-rank, condition number, generated exposure, and physical-event counts. There is
+rank, condition number, generated exposure, and physical-event counts. Diagnostics
+also record `response_model`, `accepted_weights`, `accepted_positive_rows`,
+`accepted_negative_rows`, `accepted_zero_rows`, the raw signed
+`accepted_positive_sum` and `accepted_negative_sum`, and
+`accepted_contribution_sum` after density correction. These fields survive
+serialization; `accepted_weights` records automatic signed estimator handling
+as `"signed"`, and statistics remain on the extraction result. Record all policies
+in consumer method parameters and invalidate cached results when policies or
+implementation versions change. There is
 no silent regularization, pseudoinverse truncation, or setting unconstrained
 moments to zero. Poor MC coverage or insufficient beam-polarization information
 may make extraction impossible even if some individual moments could be measured.
@@ -426,11 +522,13 @@ still use its stored factor.
 The output normalizer must be positive and finite. Signed data weights do not
 guarantee this; a failed normalizer raises an actionable error.
 
-Data angles are the chosen measured hypothesis angles, while accepted MC uses
-truth angles. The method assumes negligible reconstruction and incorrect-hypothesis
+Data angles are the chosen measured hypothesis angles. The default response uses
+accepted truth on both sides and assumes negligible reconstruction and incorrect-hypothesis
 angular migration. Multiple hypotheses are supported statistically, but grouping
-does not correct a systematic migration. A future unfolding extension would need
-both truth and reconstructed MC coordinates.
+does not correct a systematic migration. The paired truth-to-reconstruction
+model supplies an angular response when both sets of accepted coordinates are
+available; the reconstructed diagonal approximation assumes their distinction
+away. Neither angular model alone handles migration between mass bins.
 
 The samples must share the frame, cuts, beam exposure, weighting convention, and
 relevant kinematic distributions. Reusing a response across different bins or

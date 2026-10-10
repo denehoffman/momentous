@@ -22,6 +22,76 @@ from momentous.samples import EventSample
 
 
 @dataclass(frozen=True, init=False, repr=False, eq=False)
+class ResponseModel:
+    """Declare coordinates for observed test and intensity features.
+
+    Use ``truth()`` for the historical same-truth-coordinate response,
+    ``reconstructed_diagonal()`` for a same-reconstruction approximation, or
+    ``truth_to_reconstruction(truth=...)`` for paired accepted-row coordinates.
+    This declaration does not establish any statistical link between MC samples.
+    """
+
+    mode: Literal["truth", "reconstructed_diagonal", "truth_to_reconstruction"]
+    truth_sample: EventSample | None
+
+    def __init__(self) -> None:
+        """Require a named coordinate-model constructor."""
+        raise TypeError(
+            "Use ResponseModel.truth, reconstructed_diagonal, or truth_to_reconstruction"
+        )
+
+    @classmethod
+    def truth(cls) -> Self:
+        """Use supplied accepted truth coordinates on both sides of the response."""
+        return cls._build("truth")
+
+    @classmethod
+    def reconstructed_diagonal(cls) -> Self:
+        """Use reconstructed coordinates on both sides, assuming away migration.
+
+        Differing reconstructed hypotheses within a physical event are allowed.
+        This approximation needs closure validation before scientific use and
+        does not correct general angular or mass-bin migration.
+        """
+        return cls._build("reconstructed_diagonal")
+
+    @classmethod
+    def truth_to_reconstruction(cls, *, truth: EventSample) -> Self:
+        """Pair accepted reconstructed rows with declared truth intensity rows.
+
+        ``truth`` must have the same row order and physical IDs as accepted MC.
+        Its weights are ignored: all estimator weights come from accepted MC.
+        Truth angles and polarization must agree within each physical event.
+        Independent generated MC supplies exposure, never a guessed truth join.
+        This angular response alone does not model migration between mass bins.
+        """
+        if not isinstance(truth, EventSample):
+            raise TypeError("truth must be an EventSample")
+        return cls._build("truth_to_reconstruction", truth)
+
+    @classmethod
+    def _build(
+        cls,
+        mode: Literal["truth", "reconstructed_diagonal", "truth_to_reconstruction"],
+        truth: EventSample | None = None,
+    ) -> Self:
+        """Freeze the coordinate declaration and optional immutable truth sample."""
+        instance = cls.__new__(cls)
+        object.__setattr__(instance, "mode", mode)
+        object.__setattr__(instance, "truth_sample", truth)
+        return instance
+
+    def __repr__(self) -> str:
+        """Describe the declared model without dumping truth arrays."""
+        argument = "truth=EventSample(...)" if self.truth_sample is not None else ""
+        return f"ResponseModel.{self.mode}({argument})"
+
+    def __reduce__(self) -> tuple:
+        """Restore the coordinate declaration and immutable truth snapshot."""
+        return ResponseModel._build, (self.mode, self.truth_sample)
+
+
+@dataclass(frozen=True, init=False, repr=False, eq=False)
 class MCIntegration:
     """Declare how MC generation samples the reference angular measure.
 
@@ -62,8 +132,8 @@ class MCIntegration:
         relative_density : laddu.Expr
             Generation density q relative to the reference measure. It may use
             sample scalars ``costheta``, ``phi`` and polarized ``P``, ``Phi``. It is
-            evaluated at truth coordinates for both MC samples. An overall
-            constant cancels. Do not also include 1/q in the sample weights.
+            evaluated at generated truth and accepted intensity coordinates in
+            the declared response model. An overall constant cancels. Do not also include 1/q in the sample weights.
 
         Returns
         -------
@@ -83,16 +153,25 @@ class MCIntegration:
         object.__setattr__(instance, "relative_density", relative_density)
         return instance
 
-    def _weights(self, sample: EventSample, execution: ld.Execution) -> RealArray:
-        """Compute nonnegative exposure weights with the declared density."""
-        if np.any(sample.weights < 0):
+    def _weights(
+        self,
+        sample: EventSample,
+        execution: ld.Execution,
+        *,
+        role: Literal["generated", "accepted"],
+        coordinates: EventSample | None = None,
+    ) -> RealArray:
+        """Compute exposure or estimator weights at declared intensity coordinates."""
+        if role == "generated" and np.any(sample.weights < 0):
             raise ValueError(
-                "MC weights must be nonnegative exposure/selection weights"
+                "Generated MC weights must be nonnegative exposure weights"
             )
         density = np.ones(len(sample))
         if self.relative_density is not None and len(sample):
             raw = np.asarray(
-                sample._dataset().evaluate(self.relative_density, execution=execution)
+                (sample if coordinates is None else coordinates)
+                ._dataset()
+                .evaluate(self.relative_density, execution=execution)
             )
             if np.any(raw.imag != 0):
                 raise ValueError("Generation density must be real")
@@ -227,6 +306,15 @@ class ResponseDiagnostics:
         Sum of generated importance/exposure weights; accepted sums never replace it.
     generated_events, accepted_events : int
         Physical-event counts, after grouping hypotheses.
+    response_model, accepted_weights : str
+        Declared coordinate model and accepted-weight handling, independent of
+        the statistical policy. Accepted estimator weights are always signed.
+    accepted_positive_rows, accepted_negative_rows, accepted_zero_rows : int
+        Counts by sign of the supplied accepted estimator weights.
+    accepted_positive_sum, accepted_negative_sum : float
+        Signed sums of the supplied weights before density correction.
+    accepted_contribution_sum : float
+        Signed sum after inverse-density correction (never generated exposure).
 
     Notes
     -----
@@ -238,6 +326,14 @@ class ResponseDiagnostics:
     generated_exposure: float
     generated_events: int
     accepted_events: int
+    response_model: str = "truth"
+    accepted_weights: str = "signed"
+    accepted_positive_rows: int = 0
+    accepted_negative_rows: int = 0
+    accepted_zero_rows: int = 0
+    accepted_positive_sum: float = 0.0
+    accepted_negative_sum: float = 0.0
+    accepted_contribution_sum: float = 0.0
 
     def __post_init__(self) -> None:
         """Own an immutable snapshot of the numerical spectrum."""
@@ -274,6 +370,14 @@ class ResponseDiagnostics:
             self.generated_exposure,
             self.generated_events,
             self.accepted_events,
+            self.response_model,
+            self.accepted_weights,
+            self.accepted_positive_rows,
+            self.accepted_negative_rows,
+            self.accepted_zero_rows,
+            self.accepted_positive_sum,
+            self.accepted_negative_sum,
+            self.accepted_contribution_sum,
         )
 
 
@@ -345,7 +449,7 @@ class ExtractionResult:
 
     def __repr__(self) -> str:
         """Summarize the expansion, uncertainty scope, and conditioning."""
-        return f"ExtractionResult(basis={self.basis!r}, statistics={self.statistics!r}, condition_number={self.diagnostics.condition_number:.3g})"
+        return f"ExtractionResult(basis={self.basis!r}, statistics={self.statistics!r}, response_model={self.diagnostics.response_model!r}, accepted_weights={self.diagnostics.accepted_weights!r}, condition_number={self.diagnostics.condition_number:.3g})"
 
     def __str__(self) -> str:
         """Describe extracted moments and their uncertainty scope."""
@@ -373,9 +477,10 @@ class Acceptance:
     -----
     Construct with separate generated and accepted samples, then reuse ``extract``
     for independent data samples sharing the frame, beam exposure, and detector
-    response. Both MC samples are required. Accepted angles are truth angles. No resolution or
-    incorrect-hypothesis migration is modeled. The full basis is solved even
-    when only a few moments will be used in a later compatibility analysis.
+    response. Both MC samples are required. Accepted angles default to truth
+    angles; an explicit response model permits reconstructed test coordinates
+    and either paired truth intensity coordinates or a diagonal approximation.
+    The full basis is solved even when only a few moments will be used in a later compatibility analysis.
 
     Examples
     --------
@@ -406,9 +511,11 @@ class Acceptance:
     basis: MomentBasis
     integration: MCIntegration
     statistics: MCStatistics
+    response_model: ResponseModel
     diagnostics: ResponseDiagnostics
     _response: RealArray
     _accepted_features: RealArray
+    _intensity_features: RealArray
     _accepted_weights: RealArray
     _accepted_indices: NDArray[np.int64]
     _accepted_events: int
@@ -424,6 +531,7 @@ class Acceptance:
         basis: MomentBasis | None = None,
         integration: MCIntegration | None = None,
         statistics: MCStatistics | None = None,
+        response_model: ResponseModel | None = None,
         execution: ld.Execution | None = None,
     ) -> None:
         """Estimate a moment response from two separately constructed MC samples.
@@ -431,9 +539,11 @@ class Acceptance:
         Parameters
         ----------
         generated, accepted : EventSample
-            Generated exposure and selected MC with nonnegative weights and truth
-            angles. Accepted hypothesis weights retain their supplied values. Both
-            samples must use comparable exposure and weight units.
+            Generated exposure (nonnegative weights, truth coordinates) and
+            accepted estimator rows in the declared coordinate model. Accepted
+            hypothesis weights, including negative subtraction weights, retain
+            their supplied values automatically. Both samples must use comparable
+            exposure and weight units.
         basis : MomentBasis, optional
             Complete angular expansion, defaulting to L=4 with the generated
             sample's polarization mode. Set this explicitly for other truncations.
@@ -445,6 +555,11 @@ class Acceptance:
             physical events with common IDs and matching truth coordinates.
             ``independent()`` asserts independent Poisson samples; ``data_only()``
             conditions on the response and excludes finite-MC uncertainty.
+        response_model : ResponseModel, optional
+            Defaults to ``truth()``. ``reconstructed_diagonal()`` permits differing
+            reconstructed hypotheses but assumes away migration.
+            ``truth_to_reconstruction(truth=...)`` pairs reconstructed test rows
+            with truth intensity rows carrying the same physical IDs and row order.
         execution : laddu.Execution, optional
             Defaults to double-precision JIT without thread limits.
 
@@ -479,6 +594,10 @@ class Acceptance:
             integration = MCIntegration.uniform()
         if statistics is None:
             statistics = MCStatistics.linked()
+        if response_model is None:
+            response_model = ResponseModel.truth()
+        if not isinstance(response_model, ResponseModel):
+            raise TypeError("response_model must be a ResponseModel")
         if not isinstance(basis, MomentBasis):
             raise TypeError("basis must be a MomentBasis")
         if not isinstance(integration, MCIntegration) or not isinstance(
@@ -493,31 +612,75 @@ class Acceptance:
         ):
             raise ValueError("Both MC samples must match the MomentBasis polarization")
         _truth_by_event(generated)
-        _truth_by_event(accepted)
+        intensity = accepted
+        declared_truth = None
+        if response_model.mode == "truth_to_reconstruction":
+            intensity = response_model.truth_sample
+            assert intensity is not None
+            if (
+                len(intensity) != len(accepted)
+                or intensity._ids != accepted._ids
+                or not np.array_equal(intensity._indices, accepted._indices)
+            ):
+                raise ValueError(
+                    "Accepted truth rows must match reconstructed row order and physical IDs"
+                )
+            if intensity.polarized != basis.polarized:
+                raise ValueError(
+                    "Accepted truth must match the MomentBasis polarization"
+                )
+            declared_truth = intensity
+        elif response_model.mode == "truth":
+            declared_truth = accepted
+        if declared_truth is not None:
+            _truth_by_event(declared_truth)
         linked = (
-            _link_events(generated, accepted) if statistics.mode == "linked" else None
+            _link_events(generated, accepted, truth=declared_truth)
+            if statistics.mode == "linked"
+            else None
         )
         runtime = execution_or_default(execution)
-        generated_weights = integration._weights(generated, runtime)
-        accepted_weights = integration._weights(accepted, runtime)
+        generated_weights = integration._weights(generated, runtime, role="generated")
+        estimator_weights = integration._weights(
+            accepted,
+            runtime,
+            role="accepted",
+            coordinates=intensity,
+        )
         exposure = float(np.sum(generated_weights))
         if not np.isfinite(exposure) or exposure <= 0:
             raise ValueError("Generated MC exposure must be positive and finite")
         features = basis._features(accepted, runtime)
+        intensity_features = (
+            features if intensity is accepted else basis._features(intensity, runtime)
+        )
         with np.errstate(over="raise", invalid="raise"):
             try:
                 # Divide before the matrix product to avoid squaring raw weight scales.
                 response = features.T @ (
-                    features * (accepted_weights / exposure)[:, None]
+                    intensity_features * (estimator_weights / exposure)[:, None]
                 )
                 response *= basis.expansion_scales[None, :]
             except FloatingPointError as error:
                 raise ValueError(
                     "MC response exceeds numerical range; rescale weight units"
                 ) from error
+        if not np.all(np.isfinite(response)):
+            raise ValueError("MC response must be finite; rescale weight units")
         singular = np.linalg.svd(response, compute_uv=False)
         diagnostics = ResponseDiagnostics(
-            singular, exposure, generated.n_events, accepted.n_events
+            singular,
+            exposure,
+            generated.n_events,
+            accepted.n_events,
+            response_model.mode,
+            "signed",
+            int(np.count_nonzero(accepted.weights > 0)),
+            int(np.count_nonzero(accepted.weights < 0)),
+            int(np.count_nonzero(accepted.weights == 0)),
+            float(np.sum(accepted.weights[accepted.weights > 0])),
+            float(np.sum(accepted.weights[accepted.weights < 0])),
+            float(np.sum(estimator_weights)),
         )
         if diagnostics.rank != len(basis):
             raise ExtractionError(
@@ -534,10 +697,12 @@ class Acceptance:
             ("integration", integration),
             ("basis", basis),
             ("statistics", statistics),
+            ("response_model", response_model),
             ("diagnostics", diagnostics),
             ("_response", readonly(response)),
             ("_accepted_features", readonly(features)),
-            ("_accepted_weights", readonly(accepted_weights)),
+            ("_intensity_features", readonly(intensity_features)),
+            ("_accepted_weights", readonly(estimator_weights)),
             ("_accepted_indices", readonly(accepted._indices)),
             ("_accepted_events", accepted.n_events),
             ("_generated_exposure", readonly(grouped_exposure)),
@@ -658,7 +823,7 @@ class Acceptance:
         if self.statistics.mode == "data_only":
             return np.zeros((len(self.basis), len(self.basis)))
         features = self._accepted_features
-        projected = features @ (self.basis.expansion_scales * moments)
+        projected = self._intensity_features @ (self.basis.expansion_scales * moments)
         rows = features * (self._accepted_weights * projected)[:, None]
         accepted = np.zeros((self._accepted_events, len(self.basis)))
         np.add.at(accepted, self._accepted_indices, rows)
@@ -683,7 +848,7 @@ class Acceptance:
 
     def __repr__(self) -> str:
         """Summarize the response and uncertainty policy without dumping arrays."""
-        return f"Acceptance(basis={self.basis!r}, statistics={self.statistics!r}, condition_number={self.diagnostics.condition_number:.3g})"
+        return f"Acceptance(basis={self.basis!r}, statistics={self.statistics!r}, response_model={self.response_model!r}, condition_number={self.diagnostics.condition_number:.3g})"
 
     def __str__(self) -> str:
         """Describe the corrected expansion and response identifiability."""
@@ -719,12 +884,14 @@ def _truth_by_event(sample: EventSample) -> RealArray:
     grouped = truth[first]
     if not np.allclose(truth, grouped[sample._indices], rtol=0, atol=1e-10):
         raise ValueError(
-            "MC hypotheses in each physical event must share truth angles and polarization; reconstruction migration is unsupported"
+            "MC hypotheses in each physical event must share truth angles and polarization; declared truth coordinates are inconsistent"
         )
     return grouped
 
 
-def _link_events(generated: EventSample, accepted: EventSample) -> NDArray[np.int64]:
+def _link_events(
+    generated: EventSample, accepted: EventSample, *, truth: EventSample | None
+) -> NDArray[np.int64]:
     """Validate common event IDs and truth coordinates for linked MC statistics."""
     if generated.events.ids is None or accepted.events.ids is None:
         raise ValueError("Linked MC requires explicit event IDs in both samples")
@@ -736,8 +903,8 @@ def _link_events(generated: EventSample, accepted: EventSample) -> NDArray[np.in
     indices = np.asarray(
         [lookup[identifier] for identifier in accepted._ids], dtype=np.int64
     )
-    if not np.allclose(
-        _truth_by_event(accepted),
+    if truth is not None and not np.allclose(
+        _truth_by_event(truth),
         _truth_by_event(generated)[indices],
         rtol=0,
         atol=1e-10,

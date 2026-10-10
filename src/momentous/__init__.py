@@ -22,6 +22,7 @@ from momentous.extraction import (
     MCIntegration,
     MCStatistics,
     ResponseDiagnostics,
+    ResponseModel,
 )
 from momentous.results import (
     Bound,
@@ -39,6 +40,7 @@ from momentous.search import SearchResult
 
 __all__ = [
     "Acceptance",
+    "ResponseModel",
     "AnalysisResult",
     "Bound",
     "CheckProgress",
