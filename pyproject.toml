@@ -1,6 +1,6 @@
 [project]
 name = "momentous"
-version = "0.1.0"
+version = "0.1.1"
 description = "Covariance-aware angular-moment bounds and partial-wave compatibility"
 readme = "README.md"
 authors = [{ name = "Dene Hoffman", email = "nhoffman@wm.edu" }]
