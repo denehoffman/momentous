@@ -247,7 +247,8 @@ compatibility method. `n_sigma` is not a joint confidence level or p-value;
 `tolerance` is separate absolute slack in normalized coordinates.
 
 `analysis.for_waves(waves)` validates membership once and returns a candidate view
-with `status()`, `check()`, `operators()`, `bounds()`, and `region(...)`. It shares
+with `status()`, `check()`, `required_n_sigma()`, `operators()`, `bounds()`, and
+`region(...)`. It shares
 analysis caches. The analysis also provides these operations with an optional
 candidate argument. Empty candidates check incompatible and have no geometry.
 
@@ -257,6 +258,32 @@ conversion raise for unresolved outcomes. With `diagnostics=True`, a check retur
 complete `ProjectionFailure` records for verified exclusions and `UnresolvedPair`
 records with an available reason. Unresolved records claim no projection witness.
 Detailed checks evaluate the actual candidate even when status could be inferred.
+
+To ask how large the uncertainty radius must be for an assumed waveset to pass:
+
+```python
+required = analysis.required_n_sigma()  # The full pool
+required = analysis.required_n_sigma(waves, accuracy=1e-3)
+required = analysis.for_waves(waves).required_n_sigma(accuracy=1e-3)
+```
+
+The result is a verified passing upper bound within the requested absolute radius
+accuracy of the minimum. Zero means the measured center passes; infinity means
+an exact constraint excludes every finite radius (or the waveset is empty).
+Numerically unresolved calculations raise `UnresolvedCompatibilityError`.
+The method solves scalar requirements analytically and pair requirements by direct
+conic optimization, then verifies the radius using the continuous pair checker.
+It reuses normalized data, covariance geometry, and solver templates, with a
+separate cache for each candidate. Tighter accuracy refines the cached result.
+
+This calculation uses the analysis's combination size and numerical tolerance,
+independently of its configured `n_sigma`. Existing check/search results and
+`on_check` callbacks are unaffected; solver work contributes to `analysis.stats`.
+To check or search at the returned radius, create an analysis with
+`mo.analyze(data, pool, n_sigma=required)` using the same combination size and
+tolerance. An infinite radius cannot be supplied to `analyze`.
+Passing these necessary conditions does not establish a simultaneous amplitude
+fit, and the returned radius is not a joint confidence level or p-value.
 
 Operators follow `candidate.waves.waves` order. Polarized operators use a whitened
 normalization metric. Regions return labels, measured point, covariance, support

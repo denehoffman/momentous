@@ -19,6 +19,7 @@ from momentous.results import (
     Region2D,
     SolverStats,
     Status,
+    UnresolvedCompatibilityError,
 )
 
 if TYPE_CHECKING:
@@ -33,6 +34,7 @@ class _Pair:
     point: RealArray
     root: RealArray
     whitener: RealArray | None
+    nullspace: RealArray
 
 
 class _HullBatch:
@@ -115,7 +117,7 @@ def _geometry(
     whitener = None
     if np.all(eigenvalues > 0):
         whitener = (vectors / np.sqrt(eigenvalues)) @ vectors.T
-    return _Pair(indices, point, root, whitener)
+    return _Pair(indices, point, root, whitener, vectors[:, eigenvalues == 0])
 
 
 def _arc(alpha: float, beta: float) -> list[tuple[float, float]]:
@@ -277,6 +279,35 @@ class _ConicSolver:
                 cp.norm(self.normal) <= 1,
             ],
         )
+        self.slack = cp.Parameter(nonneg=True)
+        self.radius_problem = cp.Problem(
+            cp.Minimize(cp.norm(self.t)),
+            [
+                self.rho >> 0,
+                cp.trace(self.rho) == 1,
+                cp.norm(x - self.p - self.root @ self.t) <= self.slack,
+            ],
+        )
+
+    def minimum_radius(
+        self,
+        operators: ComplexArray,
+        pair: _Pair,
+        tolerance: float,
+        stats: SolverStats,
+    ) -> float:
+        """Propose a minimum radius for subsequent independent verification."""
+        self.a.value = operators[0].real if self.real else operators[0]
+        self.b.value = operators[1].real if self.real else operators[1]
+        self.p.value, self.root.value = pair.point, pair.root
+        self.slack.value = tolerance
+        self.rho.value = None
+        self.t.value = None
+        if self.solve(self.radius_problem, stats) and self.t.value is not None:
+            estimate = float(np.linalg.norm(self.t.value))
+            if np.isfinite(estimate):
+                return estimate
+        raise UnresolvedCompatibilityError("Minimum pair radius could not be solved")
 
     def solve(self, problem: cp.Problem, stats: SolverStats) -> bool:
         """Attempt Clarabel optimization and record time even on failure."""
@@ -361,7 +392,9 @@ def _ellipse_projection(delta: RealArray, root: RealArray, tau: float) -> RealAr
             scale = float(np.max(axes))
             axes = axes / scale
             values_scaled = values / np.sqrt(scale)
-            upper = float(np.linalg.norm(np.sqrt(axes) * values_scaled))
+            # Twice the analytic upper bound leaves a strict sign change even
+            # when huge whitened coordinates round the endpoint residual to zero.
+            upper = 2 * float(np.linalg.norm(np.sqrt(axes) * values_scaled))
             multiplier = brentq(
                 lambda x: float(np.sum(axes * values_scaled**2 / (axes + x) ** 2) - 1),
                 0,
@@ -490,6 +523,92 @@ def _check_pair(
     if key not in solvers:
         solvers[key] = _ConicSolver(*key)
     return solvers[key].check(operators, pair, tau, tolerance, stats)
+
+
+def _required_pair_sigma(
+    operators: ComplexArray,
+    pair: _Pair,
+    current: float,
+    accuracy: float,
+    tolerance: float,
+    stats: SolverStats,
+    solvers: dict[tuple[int, bool], _ConicSolver],
+) -> tuple[float, float]:
+    """Directly optimize a pair radius and certify an enclosing interval."""
+    result = _check_pair(operators, pair, current, tolerance, stats, solvers)
+    if result.status is Status.COMPATIBLE:
+        return 0.0, current
+    lower = current if result.status is Status.INCOMPATIBLE else 0.0
+
+    # Project only truly zero covariance eigenvalues. Tiny positive variances
+    # must remain adjustable, however large the required radius becomes.
+    if pair.nullspace.shape[1]:
+        projection = pair.nullspace @ pair.nullspace.T
+        exact = _geometry(projection @ pair.point, np.zeros((2, 2)))
+        exact_operators = np.einsum("ij,jkl->ikl", projection, operators)
+        verdict = _check_pair(exact_operators, exact, 0, tolerance, stats, solvers)
+        if verdict.status is Status.INCOMPATIBLE:
+            return float("inf"), float("inf")
+        if not np.any(pair.root):
+            raise UnresolvedCompatibilityError("Exact pair compatibility is unresolved")
+
+    key = (operators.shape[1], bool(np.all(operators.imag == 0)))
+    if key not in solvers:
+        solvers[key] = _ConicSolver(*key)
+    estimate = solvers[key].minimum_radius(operators, pair, tolerance, stats)
+    step = accuracy / 4
+    upper = max(current, estimate) + step
+    upper_status = Status.UNRESOLVED
+    for _ in range(32):
+        if not np.isfinite(upper) or upper <= lower:
+            break
+        verdict = _check_pair(operators, pair, upper, tolerance, stats, solvers)
+        upper_status = verdict.status
+        if verdict.status is Status.COMPATIBLE:
+            break
+        if verdict.status is Status.INCOMPATIBLE:
+            lower = upper
+        step *= 2
+        upper += step
+    else:
+        raise UnresolvedCompatibilityError("No passing pair radius could be verified")
+    if not np.isfinite(upper) or upper_status is not Status.COMPATIBLE:
+        raise UnresolvedCompatibilityError("No passing pair radius could be verified")
+
+    # A near-optimal solve usually needs just one lower-bound verification.
+    probe = max(lower, min(upper, estimate - accuracy / 2))
+    if probe > lower:
+        verdict = _check_pair(operators, pair, probe, tolerance, stats, solvers)
+        if verdict.status is Status.INCOMPATIBLE:
+            lower = probe
+        elif verdict.status is Status.COMPATIBLE:
+            upper = probe
+    for _ in range(80):
+        if upper - lower <= accuracy:
+            return lower, upper
+        middle = (lower + upper) / 2
+        if not lower < middle < upper:
+            break
+        verdict = _check_pair(operators, pair, middle, tolerance, stats, solvers)
+        if verdict.status is Status.COMPATIBLE:
+            upper = middle
+        elif verdict.status is Status.INCOMPATIBLE:
+            lower = middle
+        else:
+            # A narrow unresolved band near tangency need not prevent an
+            # accuracy certificate. Probe either side without guessing a verdict.
+            previous = (lower, upper)
+            for probe in (middle - accuracy / 4, middle + accuracy / 4):
+                if not lower < probe < upper:
+                    continue
+                verdict = _check_pair(operators, pair, probe, tolerance, stats, solvers)
+                if verdict.status is Status.COMPATIBLE:
+                    upper = probe
+                elif verdict.status is Status.INCOMPATIBLE:
+                    lower = probe
+            if previous == (lower, upper):
+                break
+    raise UnresolvedCompatibilityError("Minimum pair radius accuracy is unresolved")
 
 
 def check_pair(

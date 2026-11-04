@@ -80,6 +80,46 @@ class CandidateAnalysis:
             raise ValueError("diagnostics must be a boolean")
         return self._analysis._engine.check(self._mask, diagnostics=diagnostics)
 
+    def required_n_sigma(self, *, accuracy: float = 1e-3) -> float:
+        """Find the smallest verified passing covariance radius for this waveset.
+
+        Parameters
+        ----------
+        accuracy : float, default 1e-3
+            Positive finite absolute accuracy in radius units.
+
+        Returns
+        -------
+        float
+            A verified passing upper bound within accuracy of the minimum. Zero
+            means the measured center passes. Infinity means an exact constraint
+            excludes every finite radius, or the candidate is empty.
+
+        Raises
+        ------
+        ValueError
+            If accuracy is not finite and positive.
+        UnresolvedCompatibilityError
+            If numerical verification cannot establish the required accuracy.
+
+        Notes
+        -----
+        Uses this analysis's combination size and numerical tolerance, independently
+        of its fixed n_sigma. Reuses prepared geometry and solver templates, with a
+        separate radius cache. Does not change check/search verdicts or invoke
+        on_check callbacks; solver work is included in analysis.stats.
+        Passing necessary scalar/pair conditions is not a simultaneous amplitude
+        fit. The radius is not a joint confidence level or p-value.
+
+        Examples
+        --------
+        >>> from momentous import Covariance
+        >>> data = MomentData({(0, 0): 1, (1, 0): 0}, covariance=Covariance.exact())
+        >>> analyze(data, Waveset([(0, 0)])).for_waves(Waveset([(0, 0)])).required_n_sigma()
+        0.0
+        """
+        return self._analysis._engine.required_n_sigma(self._mask, accuracy)
+
     def operators(self) -> ComplexArray:
         """Return immutable normalized operators in this candidate's wave order.
 
@@ -256,6 +296,40 @@ class AnalysisResult:
         """
         return self.for_waves(self.pool if waves is None else waves).check(
             diagnostics=diagnostics
+        )
+
+    def required_n_sigma(
+        self, waves: Waveset | None = None, *, accuracy: float = 1e-3
+    ) -> float:
+        """Find the passing radius for a candidate, defaulting to the full pool.
+
+        Parameters
+        ----------
+        waves : Waveset, optional
+            Candidate drawn from this pool; omission selects the full pool.
+        accuracy : float, default 1e-3
+            Positive finite absolute accuracy in radius units.
+
+        Returns
+        -------
+        float
+            Verified passing upper bound within accuracy of the minimum, zero for
+            a passing center, or infinity for a certified exact exclusion.
+
+        Raises
+        ------
+        ValueError
+            If waves are outside the pool or accuracy is invalid.
+        UnresolvedCompatibilityError
+            If the radius or requested accuracy cannot be verified.
+
+        Notes
+        -----
+        See CandidateAnalysis.required_n_sigma for the numerical and statistical
+        interpretation. Empty candidates require an infinite radius.
+        """
+        return self.for_waves(self.pool if waves is None else waves).required_n_sigma(
+            accuracy=accuracy
         )
 
     def operators(self, waves: Waveset | None = None) -> ComplexArray:

@@ -117,6 +117,28 @@ With `max_combination_size=1`, stop after scalar checks. Size 2 uses all
 nonredundant scalar pairs continuously; larger sizes are explicitly unsupported.
 There is no angular sampling parameter in the compatibility predicate.
 
+`required_n_sigma` computes the smallest passing radius for a fixed candidate.
+Scalar requirements come from the distance to each spectral interval, minus the
+same numerical allowance used in checks, divided by its standard deviation.
+An excluded scalar with zero variance requires an infinite radius. For pairs,
+the direct optimization is
+
+```text
+minimize ||t||
+subject to X >= 0, tr(X) = 1,
+           ||(tr(A X), tr(B X)) - p - V^(1/2) t|| <= tolerance.
+```
+
+The candidate requirement is the maximum of its scalar and pair requirements.
+Pairs already verified at the current maximum need no radius optimization.
+Optimizer output proposes a radius; the existing continuous checker verifies
+passing upper bounds and excluded lower bounds. A short refinement is used only
+when needed to meet the requested absolute radius accuracy. Singular covariance
+is retained: projecting onto truly zero-variance directions can certify that no
+finite radius passes. A failed optimizer or an uncertified bracket never proves
+infinity; it raises `UnresolvedCompatibilityError` instead. Candidate radius
+intervals are cached separately from fixed-radius compatibility certificates.
+
 Numerical regions sample support eigenvalues over a full circle. Supporting
 eigenvectors supply attainable points; tangent extrema inside degenerate
 supporting eigenspaces supply both flat-face endpoints. Their convex hull is an

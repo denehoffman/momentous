@@ -18,6 +18,7 @@ from momentous.geometry import (
     _geometry,
     _HullBatch,
     _point_hull_witness,
+    _required_pair_sigma,
 )
 from momentous.results import (
     Bound,
@@ -29,6 +30,7 @@ from momentous.results import (
     RealArray,
     SolverStats,
     Status,
+    UnresolvedCompatibilityError,
     UnresolvedPair,
 )
 
@@ -56,6 +58,7 @@ class Engine:
         self._indices = {wave: index for index, wave in enumerate(pool.waves)}
         self._cache: dict[int, CheckResult] = {}
         self._detailed: dict[int, CheckResult] = {}
+        self._radii: dict[int, tuple[float, float]] = {}
         self._passing: set[int] = set()
         self._failing: set[int] = set()
         self._solvers: dict[tuple[int, bool], _ConicSolver] = {}
@@ -148,6 +151,74 @@ class Engine:
         eigenvalues, vectors = np.linalg.eigh(metric)
         transform = (vectors / np.sqrt(eigenvalues)) @ vectors.conj().T
         return np.asarray(transform @ raw @ transform, dtype=np.complex128)
+
+    def required_n_sigma(self, mask: int, accuracy: float) -> float:
+        """Compute and separately cache a certified candidate radius interval."""
+        if isinstance(accuracy, bool) or not np.isfinite(accuracy) or accuracy <= 0:
+            raise ValueError("accuracy must be finite and positive")
+        cached = self._radii.get(mask)
+        if cached is not None:
+            lower, upper = cached
+            if np.isinf(upper) or upper - lower <= accuracy:
+                return upper
+        if not mask:
+            self._radii[mask] = (float("inf"), float("inf"))
+            return float("inf")
+        operators = self.operators(mask)
+        spectra = np.linalg.eigh(operators)[0]
+        rounding = _scalar_rounding(self.data.values, spectra)
+        distances = np.maximum(
+            np.maximum(
+                spectra[:, 0] - self.data.values,
+                self.data.values - spectra[:, -1],
+            )
+            - self.tolerance
+            - rounding,
+            0,
+        )
+        if np.any((self.errors == 0) & (distances > 0)):
+            self._radii[mask] = (float("inf"), float("inf"))
+            return float("inf")
+        radii = np.divide(
+            distances,
+            self.errors,
+            out=np.zeros_like(distances),
+            where=self.errors > 0,
+        )
+        lower = float(np.max(radii))
+        if not np.isfinite(lower):
+            raise UnresolvedCompatibilityError(
+                "Required scalar radius exceeds precision"
+            )
+        upper = float(np.nextafter(lower, np.inf)) if lower else 0.0
+        # Ensure multiplication and addition round to the passing side of every
+        # scalar comparison, using exactly the same allowance as evaluate().
+        for _ in range(8):
+            allowances = upper * self.errors + self.tolerance + rounding
+            if np.all(self.data.values + allowances >= spectra[:, 0]) and np.all(
+                self.data.values - allowances <= spectra[:, -1]
+            ):
+                break
+            upper = float(np.nextafter(upper, np.inf))
+        else:
+            raise UnresolvedCompatibilityError("Passing scalar radius is unresolved")
+        for pair in self.pairs:
+            pair_lower, pair_upper = _required_pair_sigma(
+                operators[list(pair.indices)],
+                pair,
+                upper,
+                accuracy,
+                self.tolerance,
+                self.stats,
+                self._solvers,
+            )
+            lower, upper = max(lower, pair_lower), max(upper, pair_upper)
+            if np.isinf(upper):
+                break
+        if np.isfinite(upper) and upper - lower > accuracy:
+            raise UnresolvedCompatibilityError("Required radius exceeds precision")
+        self._radii[mask] = (lower, upper)
+        return upper
 
     def check(self, mask: int, *, diagnostics: bool = False) -> CheckResult:
         """Check or infer a status; evaluate actual candidates for full diagnostics."""
@@ -283,16 +354,7 @@ class Engine:
             return CheckResult(Status.INCOMPATIBLE)
         operators = self.operators(mask)
         eigenvalues, eigenvectors = np.linalg.eigh(operators)
-        rounding = (
-            128
-            * np.finfo(float).eps
-            * np.maximum(
-                1.0,
-                np.maximum(
-                    np.abs(self.data.values), np.max(np.abs(eigenvalues), axis=1)
-                ),
-            )
-        )
+        rounding = _scalar_rounding(self.data.values, eigenvalues)
         allowances = self.n_sigma * self.errors + self.tolerance + rounding
         failed = np.flatnonzero(
             (self.data.values + allowances < eigenvalues[:, 0])
@@ -369,3 +431,12 @@ class Engine:
             else (Status.UNRESOLVED if unresolved else Status.COMPATIBLE)
         )
         return CheckResult(status, tuple(records))
+
+
+def _scalar_rounding(values: RealArray, spectra: RealArray) -> RealArray:
+    """Use identical scalar rounding slack for checks and radius calculations."""
+    return (
+        128
+        * np.finfo(float).eps
+        * np.maximum(1.0, np.maximum(np.abs(values), np.max(np.abs(spectra), axis=1)))
+    )

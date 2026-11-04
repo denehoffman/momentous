@@ -14,6 +14,7 @@ from momentous import (
 )
 from momentous.geometry import (
     _ConicSolver,
+    _ellipse_projection,
     _geometry,
     _HullBatch,
     _point_hull_witness,
@@ -124,6 +125,14 @@ def test_solver_failure_is_explicitly_unresolved(
         bool(CheckResult(result.status))
     assert not CheckResult(Status.INCOMPATIBLE)
     assert CheckResult(Status.COMPATIBLE)
+
+
+def test_ellipse_projection_brackets_huge_whitened_coordinates() -> None:
+    delta = np.array([0.2, 0.2])
+    projected = _ellipse_projection(delta, np.eye(2) * 1e-20, 3)
+    np.testing.assert_allclose(
+        projected, 3e-20 * delta / np.linalg.norm(delta), rtol=1e-12, atol=0
+    )
 
 
 def test_complex_moment_region_has_analytic_disk_support_and_immutable_data() -> None:
