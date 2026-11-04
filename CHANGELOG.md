@@ -8,6 +8,13 @@
 * Support paired truth intensity and reconstructed test coordinates, including nonsymmetric responses and truth-coordinate importance density. The reconstructed diagonal option is an approximation that requires closure validation and does not correct general angular or mass-bin migration.
 * Propagate signed hypotheses through physical-event numerator influences and retain independent generated exposure uncertainty and linked fixed-size covariance. Record policies, signed accepted counts/sums, event counts, exposure, and conditioning in serializable diagnostics.
 
+## [0.1.2](https://github.com/denehoffman/momentous/compare/v0.1.1...v0.1.2) (2026-11-04)
+
+
+### Features
+
+* Compute required uncertainty radius for wavesets ([7dc9df0](https://github.com/denehoffman/momentous/commit/7dc9df066e322f81cd2f6f049933681f729f7c98))
+
 ## [0.1.1](https://github.com/denehoffman/momentous/compare/v0.1.0...v0.1.1) (2026-10-10)
 
 
